@@ -132,7 +132,9 @@ class PickPlaceGame:
                 b['pos'][1] = self.floor_y + self.BLOCK / 2
                 b['vy'] = 0.0
                 if self.bin_x[0] <= b['pos'][0] <= self.bin_x[1]:
-                    self.blocks.remove(b)
+                    # Remove by identity: list.remove() would == -compare other
+                    # block dicts, and their numpy 'pos' arrays make that raise.
+                    self.blocks = [x for x in self.blocks if x is not b]
                     self.score += 1
                     self.flash_until = now + 0.6
                     self.spawn_block()
