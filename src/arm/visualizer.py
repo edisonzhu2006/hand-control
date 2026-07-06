@@ -43,7 +43,7 @@ class ArmVisualizer2D:
         return (int(round(x)), int(round(y)))
 
     def render(self, joint_angles, target_world=None, gripper=1.0,
-               gesture=None, tracking=True):
+               gesture=None, tracking=True, pre_draw=None):
         """Render the current arm state and return a BGR image.
 
         Args:
@@ -52,6 +52,8 @@ class ArmVisualizer2D:
             gripper: Gripper openness 0 (closed) .. 1 (open).
             gesture: Optional recognized gesture name to show.
             tracking: Whether a hand is currently driving the arm.
+            pre_draw: Optional callable(img) invoked after the background but
+                before the arm, for drawing scene elements under the links.
 
         Returns:
             img: BGR image of shape (panel_h, panel_w, 3).
@@ -64,6 +66,9 @@ class ArmVisualizer2D:
         bx, by = self.world_to_px([0, 0])
         cv2.line(img, (0, by), (self.w, by), (55, 52, 48), 1)
         cv2.line(img, (bx, 0), (bx, self.h), (55, 52, 48), 1)
+
+        if pre_draw is not None:
+            pre_draw(img)
 
         pts = self.kin.joint_positions(joint_angles)  # (num_joints + 1, 3)
         px = [self.world_to_px(p) for p in pts]

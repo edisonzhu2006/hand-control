@@ -27,6 +27,7 @@ import numpy as np
 
 sys.path.insert(0, '/Users/edison.zhu/hand-control')
 from src.pose_detection.detector import PoseDetector
+from src.pose_detection.arm_mapping import arm_to_joints, grip_openness
 from src.arm.kinematics import Kinematics
 from src.arm.visualizer import ArmVisualizer2D
 from src.utils.filters import OneEuroFilter
@@ -34,7 +35,7 @@ from src.utils.filters import OneEuroFilter
 ARM_CONFIG = '/Users/edison.zhu/hand-control/data/arm_configs/3dof_arm.json'
 PANEL_H = 480
 SIM_W = 480
-VIS_THRESHOLD = 0.3    # min landmark visibility to trust a joint
+WRIST_GAIN = 2.0       # amplify wrist bend -> claw sweep
 GRIP_SMOOTHING = 0.4   # EMA factor for the gripper only
 
 # One Euro filter tuning for pixel-space landmarks: smooth hard when still,
@@ -42,63 +43,6 @@ GRIP_SMOOTHING = 0.4   # EMA factor for the gripper only
 FILTER_MIN_CUTOFF = 0.8   # Hz
 FILTER_BETA = 0.008
 FILTERED_POINTS = ('shoulder', 'elbow', 'wrist', 'index', 'thumb')
-
-
-def _angle(v):
-    """Angle of a vector in the standard math plane (image y points down, so flip it)."""
-    return np.arctan2(-v[1], v[0])
-
-
-def _wrap(a):
-    """Wrap an angle to [-pi, pi]."""
-    return (a + np.pi) % (2 * np.pi) - np.pi
-
-
-def arm_to_joints(arm, prev_joints):
-    """Map a detected human arm to robot joint angles (relative DH angles).
-
-    Args:
-        arm: Arm dict from PoseDetector.get_arm().
-        prev_joints: Previous joint angles, used to hold a joint when its
-            driving landmark is not visible enough.
-
-    Returns:
-        (joints, valid): joint angles array and whether the core arm was tracked.
-    """
-    joints = prev_joints.copy()
-
-    core_ok = (arm['shoulder_vis'] > VIS_THRESHOLD and
-               arm['elbow_vis'] > VIS_THRESHOLD and
-               arm['wrist_vis'] > VIS_THRESHOLD)
-    if not core_ok:
-        return joints, False
-
-    upper = arm['elbow'] - arm['shoulder']   # upper arm
-    fore = arm['wrist'] - arm['elbow']        # forearm
-    a_upper = _angle(upper)
-    a_fore = _angle(fore)
-
-    joints[0] = a_upper                        # base <- upper-arm direction
-    joints[1] = _wrap(a_fore - a_upper)        # elbow <- forearm relative to upper arm
-
-    # Wrist / claw aim: only update when the hand landmarks are reliable,
-    # otherwise keep the previous wrist angle to avoid jitter.
-    if arm['index_vis'] > VIS_THRESHOLD:
-        hand = arm['index'] - arm['wrist']
-        a_hand = _angle(hand)
-        if len(joints) > 2:
-            joints[2] = _wrap(a_hand - a_fore)
-
-    return joints, True
-
-
-def grip_openness(arm):
-    """Estimate gripper openness 0 (pinched) .. 1 (open) from thumb/index spread."""
-    if arm['index_vis'] < VIS_THRESHOLD or arm['thumb_vis'] < VIS_THRESHOLD:
-        return None
-    forearm_len = np.linalg.norm(arm['wrist'] - arm['elbow']) or 1.0
-    spread = np.linalg.norm(arm['index'] - arm['thumb']) / forearm_len
-    return float(np.clip((spread - 0.12) / (0.45 - 0.12), 0.0, 1.0))
 
 
 def main():
@@ -145,7 +89,7 @@ def main():
                 for name in FILTERED_POINTS:
                     arm[name] = filters[name].apply(arm[name])
 
-                target_joints, tracking = arm_to_joints(arm, joints)
+                target_joints, tracking = arm_to_joints(arm, joints, wrist_gain=WRIST_GAIN)
                 if tracking:
                     joints = kin._clamp_joints(target_joints)
                     g = grip_openness(arm)
