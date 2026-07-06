@@ -1,0 +1,40 @@
+{
+  "camera": {
+    "index": 0,
+    "width": 1280,
+    "height": 720,
+    "fps": 30
+  },
+  "hand_detection": {
+    "max_hands": 2,
+    "confidence_threshold": 0.6,
+    "tracking_history": 30,
+    "fps": 30.0
+  },
+  "screen_control": {
+    "smoothing_factor": 0.7,
+    "dead_zone_radius": 30,
+    "acceleration_factor": 1.5,
+    "max_cursor_speed": 500,
+    "pinch_distance_threshold": 30,
+    "gesture_debounce_time": 0.1
+  },
+  "gesture_recognition": {
+    "confidence_threshold": 0.7,
+    "top_k_matches": 3,
+    "temporal_window": 10
+  },
+  "arm_control": {
+    "control_mode": "position",
+    "hand_tracking_enabled": false,
+    "hand_frame_origin": [0, 0, 500],
+    "workspace": {
+      "min_x": -500,
+      "max_x": 500,
+      "min_y": -500,
+      "max_y": 500,
+      "min_z": 0,
+      "max_z": 1000
+    }
+  }
+}

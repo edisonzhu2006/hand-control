@@ -1,0 +1,39 @@
+{
+  "name": "3-DOF Planar Arm",
+  "description": "3-axis robotic arm for planar motion (XY plane)",
+  "base_transform": [
+    [1, 0, 0, 0],
+    [0, 1, 0, 0],
+    [0, 0, 1, 0],
+    [0, 0, 0, 1]
+  ],
+  "dh_parameters": [
+    {
+      "a": 200,
+      "alpha": 0,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 200,
+      "alpha": 0,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 100,
+      "alpha": 0,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    }
+  ]
+}

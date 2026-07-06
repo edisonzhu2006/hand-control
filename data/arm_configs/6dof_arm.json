@@ -1,0 +1,66 @@
+{
+  "name": "6-DOF Industrial Arm",
+  "description": "Standard 6-axis industrial robotic arm (e.g., ABB IRB 1600)",
+  "base_transform": [
+    [1, 0, 0, 0],
+    [0, 1, 0, 0],
+    [0, 0, 1, 495],
+    [0, 0, 0, 1]
+  ],
+  "dh_parameters": [
+    {
+      "a": 0,
+      "alpha": 1.5708,
+      "d": 495,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 900,
+      "alpha": 0,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 150,
+      "alpha": 1.5708,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -2.14159,
+      "theta_max": 2.14159
+    },
+    {
+      "a": 0,
+      "alpha": -1.5708,
+      "d": 830,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 0,
+      "alpha": 1.5708,
+      "d": 0,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    },
+    {
+      "a": 0,
+      "alpha": 0,
+      "d": 225,
+      "theta": 0,
+      "joint_type": "revolute",
+      "theta_min": -3.14159,
+      "theta_max": 3.14159
+    }
+  ]
+}
