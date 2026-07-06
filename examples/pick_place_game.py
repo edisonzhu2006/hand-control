@@ -24,7 +24,9 @@ import numpy as np
 
 sys.path.insert(0, '/Users/edison.zhu/hand-control')
 from src.pose_detection.detector import PoseDetector
-from src.pose_detection.arm_mapping import arm_to_joints, grip_openness
+from src.pose_detection.arm_mapping import (
+    arm_to_joints, grip_openness, hand_grip_openness, match_hand_to_wrist)
+from src.hand_detection.detector import HandDetector
 from src.arm.kinematics import Kinematics
 from src.arm.visualizer import ArmVisualizer2D
 from src.utils.filters import OneEuroFilter
@@ -190,8 +192,23 @@ class PickPlaceGame:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 230, 120), 2, cv2.LINE_AA)
 
 
+def draw_grip_feedback(frame, hand, gripper, closed):
+    """Show the thumb-index pinch line and grip % so the player can see the signal."""
+    lm = hand['landmarks']
+    thumb = tuple(lm[4]['pixel'])
+    index = tuple(lm[8]['pixel'])
+    color = (60, 60, 255) if closed else (80, 230, 120)
+    cv2.line(frame, thumb, index, color, 3, cv2.LINE_AA)
+    cv2.circle(frame, thumb, 7, color, -1, cv2.LINE_AA)
+    cv2.circle(frame, index, 7, color, -1, cv2.LINE_AA)
+    mid = ((thumb[0] + index[0]) // 2, (thumb[1] + index[1]) // 2 - 14)
+    cv2.putText(frame, f'GRIP {gripper * 100:.0f}%', mid,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+
 def main():
     pose = PoseDetector(confidence=0.5, model_complexity=1)
+    hand_det = HandDetector(max_hands=2, confidence=0.5)
     kin = Kinematics.from_config(ARM_CONFIG)
     viz = ArmVisualizer2D(kin, panel_size=(PANEL_H, SIM_W))
     game = PickPlaceGame(viz.reach)
@@ -225,6 +242,9 @@ def main():
             frame = pose.draw(frame, results)
             arm = pose.get_arm(results, frame_w, frame_h, prefer='auto')
 
+            hand_results, _, _, _ = hand_det.detect(frame)
+            hands = hand_det.get_hand_landmarks(hand_results, frame_h, frame_w)
+
             tracking = False
             if arm is not None:
                 if arm['side'] != last_side:
@@ -234,12 +254,23 @@ def main():
                 for name in FILTERED_POINTS:
                     arm[name] = filters[name].apply(arm[name])
 
-                target_joints, tracking = arm_to_joints(arm, joints, wrist_gain=WRIST_GAIN)
+                # Match a Hands detection to the tracked arm's wrist: its
+                # 21-point landmarks give a far better pinch signal (and claw
+                # aim) than Pose's coarse thumb/index points.
+                forearm_len = np.linalg.norm(arm['wrist'] - arm['elbow'])
+                hand = match_hand_to_wrist(hands, arm['wrist'],
+                                           max_dist=max(1.2 * forearm_len, 150))
+
+                target_joints, tracking = arm_to_joints(
+                    arm, joints, wrist_gain=WRIST_GAIN, hand=hand)
                 if tracking:
                     joints = kin._clamp_joints(target_joints)
-                    g = grip_openness(arm)
+                    g = hand_grip_openness(hand) if hand is not None else grip_openness(arm)
                     if g is not None:
                         gripper = GRIP_SMOOTHING * g + (1 - GRIP_SMOOTHING) * gripper
+                    if hand is not None:
+                        draw_grip_feedback(frame, hand, gripper,
+                                           closed=gripper < PickPlaceGame.GRIP_CLOSE)
             else:
                 last_side = None
                 for f in filters.values():
