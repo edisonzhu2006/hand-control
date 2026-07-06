@@ -91,45 +91,72 @@ class Kinematics:
             joint_angles: Joint angles to reach target
             success: Whether solution converged
         """
-        if initial_guess is None:
-            joint_angles = np.zeros(self.num_joints)
-        else:
-            joint_angles = initial_guess.copy()
+        target_pos = target_pose[:3, 3]
 
-        for iteration in range(max_iterations):
-            # Forward kinematics for current angles
-            current_pose = self.forward_kinematics(joint_angles)
+        # Try the caller's guess plus a spread of offset/elbow seeds. Position-only
+        # IK on a multi-link arm has folded local minima (the arm doubling back on
+        # itself, which is what left the old solver stuck at the origin); restarting
+        # from several bent poses reliably escapes them.
+        alt = np.array([(-1.0) ** i for i in range(self.num_joints)])
+        seeds = []
+        if initial_guess is not None:
+            seeds.append(np.asarray(initial_guess, dtype=float).copy())
+        seeds += [
+            np.zeros(self.num_joints),
+            np.full(self.num_joints, 0.6),
+            np.full(self.num_joints, -0.6),
+            np.full(self.num_joints, 1.4),
+            np.full(self.num_joints, -1.4),
+            0.9 * alt,
+            -0.9 * alt,
+        ]
 
-            # Compute position error
-            pos_error = target_pose[:3, 3] - current_pose[:3, 3]
-            pos_error_mag = np.linalg.norm(pos_error)
+        best_angles = self._clamp_joints(seeds[0].copy())
+        best_err = np.inf
 
-            # Compute orientation error (simplified)
-            rot_error_mag = self._rotation_error(target_pose[:3, :3], current_pose[:3, :3])
+        for seed in seeds:
+            theta = self._clamp_joints(np.asarray(seed, dtype=float).copy())
+            err_vec = target_pos - self.forward_kinematics(theta)[:3, 3]
+            err = float(np.linalg.norm(err_vec))
 
-            # Check convergence
-            if pos_error_mag < tolerance and rot_error_mag < tolerance:
-                return joint_angles, True
+            for _ in range(max_iterations):
+                if err < best_err:
+                    best_err = err
+                    best_angles = theta.copy()
+                if err < tolerance:
+                    return theta, True
 
-            # Compute Jacobian
-            J = self._compute_jacobian(joint_angles)
-
-            # Damped least squares (Levenberg-Marquardt)
-            damping = 0.01
-            delta_x = np.concatenate([pos_error, np.array([0, 0, 0])])  # 6D error vector
-
-            try:
+                # Position-only damped least squares. These arms don't constrain
+                # end-effector orientation, so the old 6D error (with zero
+                # orientation rows) was ill-posed; solving the 3D position system
+                # directly is well-conditioned.
+                J = self._compute_jacobian(theta)[:3, :]
+                damping = 1.0  # mm-scale Levenberg-Marquardt term; stable near singularities
                 JT = J.T
-                delta_theta = JT @ np.linalg.inv(J @ JT + damping * np.eye(6)) @ delta_x
-            except np.linalg.LinAlgError:
-                # Singular, use pseudo-inverse
-                delta_theta = np.linalg.pinv(J, rcond=1e-4) @ delta_x
+                delta_theta = JT @ np.linalg.solve(J @ JT + damping * np.eye(3), err_vec)
 
-            # Update joints with small step
-            joint_angles += 0.1 * delta_theta
-            joint_angles = self._clamp_joints(joint_angles)
+                # Backtracking line search: shrink the step until the error
+                # actually drops, so each iteration is a guaranteed improvement
+                # and the solver can't oscillate into a folded pose.
+                step = 1.0
+                improved = False
+                for _ls in range(10):
+                    candidate = self._clamp_joints(theta + step * delta_theta)
+                    cand_err_vec = target_pos - self.forward_kinematics(candidate)[:3, 3]
+                    cand_err = float(np.linalg.norm(cand_err_vec))
+                    if cand_err < err:
+                        theta, err_vec, err = candidate, cand_err_vec, cand_err
+                        improved = True
+                        break
+                    step *= 0.5
 
-        return joint_angles, False
+                if not improved:
+                    break  # local minimum for this seed; move on to the next
+
+            if best_err < tolerance:
+                return best_angles, True
+
+        return best_angles, best_err < tolerance
 
     def jacobian(self, joint_angles: np.ndarray) -> np.ndarray:
         """Compute Jacobian matrix (end effector velocity w.r.t. joint velocities).
@@ -165,6 +192,36 @@ class Kinematics:
         """
         T = self.forward_kinematics(joint_angles)
         return T[:3, :3]
+
+    def joint_positions(self, joint_angles: np.ndarray) -> np.ndarray:
+        """Return Cartesian positions of the base and every joint / end effector.
+
+        Accumulates the per-joint transforms so callers can render the arm as a
+        connected chain of links.
+
+        Args:
+            joint_angles: Joint angles/displacements (rad or mm)
+
+        Returns:
+            points: (num_joints + 1, 3) array of XYZ positions, base first, end
+                effector last.
+        """
+        angles = self._clamp_joints(np.asarray(joint_angles, dtype=float))
+        T = self.base_transform.copy()
+        points = [T[:3, 3].copy()]
+
+        for angle, dh in zip(angles, self.dh_params):
+            current_dh = DHParameter(
+                a=dh.a,
+                alpha=dh.alpha,
+                d=dh.d if dh.joint_type == 'revolute' else angle,
+                theta=angle if dh.joint_type == 'revolute' else dh.theta,
+                joint_type=dh.joint_type,
+            )
+            T = T @ self._dh_transform(current_dh)
+            points.append(T[:3, 3].copy())
+
+        return np.array(points)
 
     def _dh_transform(self, dh: DHParameter) -> np.ndarray:
         """Compute 4x4 transformation matrix from DH parameters.

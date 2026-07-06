@@ -196,42 +196,105 @@ class GestureRecognizer:
         )
 
     def recognize(self, hand_data: Dict, top_k: int = 1) -> List[GestureMatch]:
-        """Recognize gesture from hand data.
+        """Recognize a static hand gesture using geometric finger-state rules.
+
+        Classifies the pose directly from the 21 MediaPipe landmarks by working
+        out which fingers are extended and how the thumb is oriented, then mapping
+        that pattern to a built-in gesture. All tests are relative distances, so
+        this is robust to hand scale and position (unlike matching against the
+        placeholder templates, which were random noise).
 
         Args:
             hand_data: Hand landmark data from detector
-            top_k: Return top K matches
+            top_k: Maximum number of matches to return
 
         Returns:
-            matches: List of GestureMatch results, sorted by confidence
+            matches: List of GestureMatch results, highest confidence first
         """
-        if not hand_data or 'landmarks' not in hand_data:
+        if not hand_data or 'landmarks' not in hand_data or len(hand_data['landmarks']) < 21:
             return []
 
-        # Extract landmarks
-        landmarks = self._extract_landmarks_array(hand_data)
+        pts = np.array([lm['pixel'] for lm in hand_data['landmarks']], dtype=np.float64)
+        match = self._classify_static(pts)
+        return [match][:top_k] if match else []
 
-        matches = []
-        for template_name, template in self.templates.items():
-            if template.is_dynamic:
-                # Skip dynamic templates for single frame
-                continue
+    def _finger_extended_states(self, pts: np.ndarray) -> Tuple[bool, Dict[str, bool]]:
+        """Determine which fingers are extended from landmark geometry.
 
-            distance = self._compute_distance(landmarks, template.landmarks)
-            confidence = self._distance_to_confidence(distance)
+        A finger is 'extended' when its tip is farther from the wrist than the
+        joint below it (PIP for the four fingers, MCP for the thumb). When a
+        finger curls, the tip folds back toward the palm and sits closer to the
+        wrist than the protruding middle knuckle, so the comparison flips. This
+        is orientation- and scale-independent.
 
-            if confidence >= template.confidence_threshold:
-                matches.append(GestureMatch(
-                    gesture_name=template.name,
-                    gesture_type=template.gesture_type,
-                    confidence=confidence,
-                    distance=distance,
-                    matched_template_name=template_name,
-                ))
+        Args:
+            pts: (21, 2) array of landmark pixel coordinates
 
-        # Sort by confidence
-        matches.sort(key=lambda m: m.confidence, reverse=True)
-        return matches[:top_k]
+        Returns:
+            (thumb_extended, {finger_name: extended})
+        """
+        def d(i, j):
+            return float(np.linalg.norm(pts[i] - pts[j]))
+
+        fingers = {
+            'index':  d(8, 0) > d(6, 0),
+            'middle': d(12, 0) > d(10, 0),
+            'ring':   d(16, 0) > d(14, 0),
+            'pinky':  d(20, 0) > d(18, 0),
+        }
+        thumb = d(4, 0) > d(2, 0)
+        return thumb, fingers
+
+    def _classify_static(self, pts: np.ndarray) -> Optional[GestureMatch]:
+        """Map finger states and thumb orientation to a built-in gesture.
+
+        Args:
+            pts: (21, 2) array of landmark pixel coordinates
+
+        Returns:
+            A GestureMatch for the recognized gesture, or None if the pose does
+            not confidently match any built-in gesture.
+        """
+        wrist = pts[0]
+        palm_size = float(np.linalg.norm(pts[9] - wrist)) or 1.0
+        _, f = self._finger_extended_states(pts)
+        n_ext = sum(f.values())
+
+        thumb_index_gap = float(np.linalg.norm(pts[4] - pts[8])) / palm_size
+        thumb_dy = (pts[4][1] - wrist[1]) / palm_size  # < 0: thumb tip above wrist
+
+        def make(name: str, conf: float) -> GestureMatch:
+            conf = float(np.clip(conf, 0.0, 1.0))
+            gtype = self.templates[name].gesture_type if name in self.templates else name
+            return GestureMatch(
+                gesture_name=name,
+                gesture_type=gtype,
+                confidence=conf,
+                distance=1.0 - conf,
+                matched_template_name=name,
+            )
+
+        # OK sign: thumb & index tips pinched together, other three fingers up
+        if thumb_index_gap < 0.4 and f['middle'] and f['ring'] and f['pinky']:
+            return make('ok_sign', 0.95 - thumb_index_gap)
+
+        # Open palm: all four fingers extended
+        if n_ext == 4:
+            return make('open_palm', 0.92)
+
+        # Peace / victory: index + middle up, ring + pinky curled
+        if f['index'] and f['middle'] and not f['ring'] and not f['pinky']:
+            return make('peace', 0.9)
+
+        # Closed hand: no fingers extended -> fist / thumbs up / thumbs down by thumb direction
+        if n_ext == 0:
+            if thumb_dy < -0.6:
+                return make('thumbs_up', 0.9)
+            if thumb_dy > 0.6:
+                return make('thumbs_down', 0.9)
+            return make('fist', 0.9)
+
+        return None
 
     def recognize_temporal(self, hand_trajectory: List[Dict], top_k: int = 1) -> List[GestureMatch]:
         """Recognize dynamic gesture from hand trajectory.
