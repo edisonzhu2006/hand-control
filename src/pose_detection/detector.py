@@ -84,6 +84,37 @@ class PoseDetector:
         arm['visibility'] = vis
         return arm
 
+    # Landmarks used by get_body: both arms plus hips for torso anchoring.
+    BODY = {
+        'l_shoulder': 11, 'r_shoulder': 12,
+        'l_elbow': 13, 'r_elbow': 14,
+        'l_wrist': 15, 'r_wrist': 16,
+        'l_hip': 23, 'r_hip': 24,
+    }
+
+    def get_body(self, results, frame_w, frame_h):
+        """Extract both arms and hips as pixel coordinates.
+
+        Args:
+            results: MediaPipe pose results.
+            frame_w: Frame width.
+            frame_h: Frame height.
+
+        Returns:
+            A dict mapping each BODY key to an (x, y) pixel array plus a
+            '<key>_vis' visibility score, or None if no pose is detected.
+        """
+        if not results.pose_landmarks:
+            return None
+
+        lms = results.pose_landmarks.landmark
+        body = {}
+        for name, idx in self.BODY.items():
+            lm = lms[idx]
+            body[name] = np.array([lm.x * frame_w, lm.y * frame_h], dtype=float)
+            body[name + '_vis'] = float(lm.visibility)
+        return body
+
     def draw(self, frame, results):
         """Draw the full pose skeleton on the frame."""
         if results.pose_landmarks:
