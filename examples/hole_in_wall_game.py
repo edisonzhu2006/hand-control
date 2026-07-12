@@ -50,6 +50,12 @@ POSES = [
     {'name': 'LEFT UP RIGHT OUT', 'angles': {'lu': 135, 'lf': 90, 'ru': 0, 'rf': 0}},
     {'name': 'RIGHT UP LEFT OUT', 'angles': {'lu': 180, 'lf': 180, 'ru': 45, 'rf': 90}},
     {'name': 'ARMS DOWN', 'angles': {'lu': 225, 'lf': 225, 'ru': -45, 'rf': -45}},
+    {'name': 'LEFT HAND UP', 'angles': {'lu': 100, 'lf': 100, 'ru': -70, 'rf': -70}},
+    {'name': 'RIGHT HAND UP', 'angles': {'lu': -110, 'lf': -110, 'ru': 80, 'rf': 80}},
+    {'name': 'HANDS UP', 'angles': {'lu': 105, 'lf': 105, 'ru': 75, 'rf': 75}},
+    {'name': 'MUSCLE FLEX', 'angles': {'lu': 180, 'lf': 55, 'ru': 0, 'rf': 125}},
+    {'name': 'HANDS ON HIPS', 'angles': {'lu': 235, 'lf': -55, 'ru': -55, 'rf': 235}},
+    {'name': 'AIRPLANE', 'angles': {'lu': 150, 'lf': 150, 'ru': -30, 'rf': -30}},
 ]
 
 
