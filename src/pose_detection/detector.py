@@ -84,12 +84,15 @@ class PoseDetector:
         arm['visibility'] = vis
         return arm
 
-    # Landmarks used by get_body: both arms plus hips for torso anchoring.
+    # Landmarks used by get_body: head, both arms, and both legs.
     BODY = {
+        'nose': 0,
         'l_shoulder': 11, 'r_shoulder': 12,
         'l_elbow': 13, 'r_elbow': 14,
         'l_wrist': 15, 'r_wrist': 16,
         'l_hip': 23, 'r_hip': 24,
+        'l_knee': 25, 'r_knee': 26,
+        'l_ankle': 27, 'r_ankle': 28,
     }
 
     def get_body(self, results, frame_w, frame_h):
