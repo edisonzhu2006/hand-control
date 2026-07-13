@@ -30,11 +30,13 @@ from src.pose_detection.detector import PoseDetector
 from src.utils.filters import OneEuroFilter
 
 VIS_THRESHOLD = 0.3
-MATCH_TOLERANCE = 25.0     # deg: a segment within this of the target counts as matched
+MATCH_TOLERANCE = 30.0     # deg: a segment within this of the target counts as matched
+FALLOFF = 50.0             # deg: score decays to 0 this far beyond tolerance
 PASS_THRESHOLD = 0.70      # overall match needed to fit through the hole
+GRACE_WINDOW = 0.5         # s: verdict uses the best match in this final window
 ROUND_TIME = 6.0           # seconds per wall, shrinks with each pass
-ROUND_TIME_MIN = 2.8
-ROUND_TIME_STEP = 0.25
+ROUND_TIME_MIN = 3.5
+ROUND_TIME_STEP = 0.2
 PERFECT_MATCH = 0.90
 START_LIVES = 3
 COUNTDOWN_SECS = 3
@@ -87,7 +89,12 @@ def ang_diff(a, b):
 
 
 def match_pose(body, angles):
-    """Overall match 0..1 (None if <2 segments visible) and per-segment flags."""
+    """Overall match 0..1 (None if <2 segments visible) and per-segment flags.
+
+    A segment scores full credit anywhere inside MATCH_TOLERANCE and decays
+    linearly beyond it, so the meter agrees with the green/orange segment
+    feedback: all segments green always means a passing score.
+    """
     scores = []
     seg_ok = {}
     for a, b, key in SEGMENTS:
@@ -96,7 +103,7 @@ def match_pose(body, angles):
             continue
         err = ang_diff(cur, angles[key])
         seg_ok[key] = err < MATCH_TOLERANCE
-        scores.append(np.clip(1.0 - err / 60.0, 0.0, 1.0))
+        scores.append(np.clip(1.0 - max(err - MATCH_TOLERANCE, 0.0) / FALLOFF, 0.0, 1.0))
     if len(scores) < 2:
         return None, seg_ok
     return float(np.mean(scores)), seg_ok
@@ -349,6 +356,7 @@ class HoleInWallGame:
         self.new_record = False
         self._order = []
         self._last_tick = None
+        self._recent = []         # (t, match) samples for the grace window
 
     @property
     def level(self):
@@ -373,6 +381,7 @@ class HoleInWallGame:
         self.deadline = now + self.round_time
         self.state = 'WALL'
         self.state_t0 = now
+        self._recent = []
 
     def time_left(self, now):
         return max(0.0, (self.deadline or now) - now)
@@ -393,8 +402,15 @@ class HoleInWallGame:
             return None
 
         if self.state == 'WALL':
+            # Track recent matches; the verdict uses the best of the final
+            # window so a single wobbly frame at the deadline can't fail you.
+            if match is not None:
+                self._recent.append((now, match))
+            self._recent = [(t, m) for t, m in self._recent if now - t <= GRACE_WINDOW]
             if self.time_left(now) > 0:
                 return None
+            if self._recent:
+                match = max(m for _, m in self._recent)
             if match is not None and match >= PASS_THRESHOLD:
                 self.walls_passed += 1
                 self.streak += 1
