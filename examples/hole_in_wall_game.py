@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-Hole in the Wall: strike the pose before the wall arrives.
+Hole in the Wall: fit through the hole before the wall hits you.
 
-A ghost pose is overlaid on your body (anchored to your own shoulders, scaled
-to your own limb lengths). A wall closes in on a countdown — match the ghost
-with your arms before it arrives. Segments turn green as you match them. If
-your overall match is good enough when the wall hits, you pass through and
-score; otherwise you crash. Each pass shaves time off the next round.
+A brick wall rushes toward you with a person-shaped hole cut out of it — your
+live camera shows through the hole. Strike the pose so you fit: your ghost
+skeleton turns green segment by segment as you match. If your pose fits when
+the wall arrives you fly through it and score (streak multiplier, PERFECT
+bonus); if not, the wall slams into you — screen shake, bricks fly, and you
+lose a heart. Three hearts, rising difficulty, persistent high score.
 
 Controls:
-    strike the pose - match all four ghost arm segments
-    s               - skip to a new pose
+    strike the pose - fit through the hole
+    s               - skip this wall (no penalty)
+    SPACE           - play again (on game over)
     q               - quit
 """
 
+import json
+import os
+import subprocess
 import sys
 import time
 
@@ -25,15 +30,20 @@ from src.pose_detection.detector import PoseDetector
 from src.utils.filters import OneEuroFilter
 
 VIS_THRESHOLD = 0.3
-MATCH_TOLERANCE = 25.0    # deg: a segment within this of the target counts as matched
-PASS_THRESHOLD = 0.70     # overall match needed to go through the wall
-ROUND_TIME = 6.0          # seconds per wall, shrinks with each pass
-ROUND_TIME_MIN = 3.0
+MATCH_TOLERANCE = 25.0     # deg: a segment within this of the target counts as matched
+PASS_THRESHOLD = 0.70      # overall match needed to fit through the hole
+ROUND_TIME = 6.0           # seconds per wall, shrinks with each pass
+ROUND_TIME_MIN = 2.8
 ROUND_TIME_STEP = 0.25
+PERFECT_MATCH = 0.90
+START_LIVES = 3
+COUNTDOWN_SECS = 3
+RESULT_SECS = 1.0
 FILTER_MIN_CUTOFF = 0.8
 FILTER_BETA = 0.008
+FRAME_W, FRAME_H = 960, 540     # game renders at 540p for speed
+HIGHSCORE_PATH = '/Users/edison.zhu/hand-control/data/hole_in_wall_highscore.json'
 
-# Arm segments: (start joint, end joint, target-angle key).
 SEGMENTS = [
     ('l_shoulder', 'l_elbow', 'lu'),
     ('l_elbow', 'l_wrist', 'lf'),
@@ -43,21 +53,25 @@ SEGMENTS = [
 
 # Target poses as segment angles in degrees (math convention: 0 = screen
 # right, 90 = up). 'l_*' is the arm on the left side of the mirrored view.
+# The first six are the easier pool used at level 1.
 POSES = [
     {'name': 'T-POSE', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0}},
     {'name': 'GOALPOST', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90}},
     {'name': 'ARMS UP', 'angles': {'lu': 135, 'lf': 135, 'ru': 45, 'rf': 45}},
-    {'name': 'LEFT UP RIGHT OUT', 'angles': {'lu': 135, 'lf': 90, 'ru': 0, 'rf': 0}},
-    {'name': 'RIGHT UP LEFT OUT', 'angles': {'lu': 180, 'lf': 180, 'ru': 45, 'rf': 90}},
     {'name': 'ARMS DOWN', 'angles': {'lu': 225, 'lf': 225, 'ru': -45, 'rf': -45}},
     {'name': 'LEFT HAND UP', 'angles': {'lu': 100, 'lf': 100, 'ru': -70, 'rf': -70}},
     {'name': 'RIGHT HAND UP', 'angles': {'lu': -110, 'lf': -110, 'ru': 80, 'rf': 80}},
+    {'name': 'LEFT UP RIGHT OUT', 'angles': {'lu': 135, 'lf': 90, 'ru': 0, 'rf': 0}},
+    {'name': 'RIGHT UP LEFT OUT', 'angles': {'lu': 180, 'lf': 180, 'ru': 45, 'rf': 90}},
     {'name': 'HANDS UP', 'angles': {'lu': 105, 'lf': 105, 'ru': 75, 'rf': 75}},
     {'name': 'MUSCLE FLEX', 'angles': {'lu': 180, 'lf': 55, 'ru': 0, 'rf': 125}},
     {'name': 'HANDS ON HIPS', 'angles': {'lu': 235, 'lf': -55, 'ru': -55, 'rf': 235}},
     {'name': 'AIRPLANE', 'angles': {'lu': 150, 'lf': 150, 'ru': -30, 'rf': -30}},
 ]
+EASY_POOL = 6
 
+
+# ---------------------------------------------------------------- pose math
 
 def seg_angle(body, a, b):
     """Angle of the segment a->b in degrees (math convention), or None if not visible."""
@@ -73,16 +87,7 @@ def ang_diff(a, b):
 
 
 def match_pose(body, angles):
-    """Score how well the body matches the target angles.
-
-    Args:
-        body: Body dict from PoseDetector.get_body().
-        angles: Target angles dict keyed like POSES[n]['angles'].
-
-    Returns:
-        (match, seg_ok): overall match 0..1 (None if too few segments are
-        visible) and a {angle_key: matched} dict for visible segments.
-    """
+    """Overall match 0..1 (None if <2 segments visible) and per-segment flags."""
     scores = []
     seg_ok = {}
     for a, b, key in SEGMENTS:
@@ -98,24 +103,18 @@ def match_pose(body, angles):
 
 
 def ghost_points(body, angles):
-    """Compute ghost joint pixel positions for the target pose.
-
-    Anchored at the player's own shoulders and scaled to their own limb
-    lengths, so the ghost sits on their body regardless of size or distance.
-    """
+    """Target-pose joint positions anchored at the player's own shoulders."""
     def direction(deg):
         r = np.radians(deg)
-        return np.array([np.cos(r), -np.sin(r)])  # screen y grows downward
+        return np.array([np.cos(r), -np.sin(r)])
 
     ghost = {}
     for side in ('l', 'r'):
         sh = body[side + '_shoulder']
         upper_len = np.linalg.norm(body[side + '_elbow'] - sh)
         fore_len = np.linalg.norm(body[side + '_wrist'] - body[side + '_elbow'])
-        # Fall back to plausible lengths if a joint is barely visible.
         upper_len = upper_len if upper_len > 10 else 90.0
         fore_len = fore_len if fore_len > 10 else 80.0
-
         elbow = sh + direction(angles[side + 'u']) * upper_len
         wrist = elbow + direction(angles[side + 'f']) * fore_len
         ghost[side + '_shoulder'] = sh
@@ -124,88 +123,150 @@ def ghost_points(body, angles):
     return ghost
 
 
-class HoleInWallGame:
-    """Round state machine: countdown wall, evaluation, scoring, difficulty."""
-
-    def __init__(self, now):
-        self.score = 0
-        self.streak = 0
-        self.round_time = ROUND_TIME
-        self.result = None          # (text, color, until)
-        self._order = np.random.permutation(len(POSES)).tolist()
-        self.pose = None
-        self.new_round(now)
-
-    def new_round(self, now):
-        if not self._order:
-            self._order = np.random.permutation(len(POSES)).tolist()
-        # Avoid repeating the pose we just played.
-        if self.pose is not None and POSES[self._order[0]] is self.pose and len(self._order) > 1:
-            self._order.append(self._order.pop(0))
-        self.pose = POSES[self._order.pop(0)]
-        self.deadline = now + self.round_time
-
-    def time_left(self, now):
-        return max(0.0, self.deadline - now)
-
-    def update(self, match, now):
-        """Advance the round; evaluate when the wall arrives.
-
-        Args:
-            match: Current overall match 0..1, or None if the body isn't visible.
-            now: Current time (seconds).
-
-        Returns:
-            'pass' | 'crash' | None for this frame.
-        """
-        if self.time_left(now) > 0:
-            return None
-
-        if match is not None and match >= PASS_THRESHOLD:
-            self.score += 1
-            self.streak += 1
-            self.round_time = max(ROUND_TIME_MIN, self.round_time - ROUND_TIME_STEP)
-            self.result = ('THROUGH!', (80, 230, 120), now + 1.2)
-            outcome = 'pass'
-        else:
-            self.streak = 0
-            self.result = ('CRASHED!', (60, 60, 255), now + 1.2)
-            outcome = 'crash'
-        self.new_round(now)
-        return outcome
+def default_body(w=FRAME_W, h=FRAME_H):
+    """Synthetic centered body used to anchor the hole before a player appears."""
+    cx, cy, half = w // 2, int(h * 0.42), int(h * 0.10)
+    b = {}
+    b['l_shoulder'] = np.array([cx - half, cy], float)
+    b['r_shoulder'] = np.array([cx + half, cy], float)
+    b['l_elbow'] = b['l_shoulder'] + [0, half * 1.6]
+    b['l_wrist'] = b['l_elbow'] + [0, half * 1.4]
+    b['r_elbow'] = b['r_shoulder'] + [0, half * 1.6]
+    b['r_wrist'] = b['r_elbow'] + [0, half * 1.4]
+    b['l_hip'] = np.array([cx - half * 0.8, cy + half * 3.2], float)
+    b['r_hip'] = np.array([cx + half * 0.8, cy + half * 3.2], float)
+    for k in list(b):
+        b[k + '_vis'] = 1.0
+    return b
 
 
-def draw_ghost(frame, ghost, seg_ok):
-    """Draw the target pose skeleton; matched segments green, unmatched orange."""
-    overlay = frame.copy()
-    for a, b, key in SEGMENTS:
-        color = (80, 230, 120) if seg_ok.get(key) else (60, 140, 255)
-        pa = tuple(np.round(ghost[a]).astype(int))
-        pb = tuple(np.round(ghost[b]).astype(int))
-        cv2.line(overlay, pa, pb, color, 14, cv2.LINE_AA)
-        cv2.circle(overlay, pb, 10, color, -1, cv2.LINE_AA)
-    # Shoulder bar to visually tie the ghost together.
-    cv2.line(overlay,
-             tuple(np.round(ghost['l_shoulder']).astype(int)),
-             tuple(np.round(ghost['r_shoulder']).astype(int)),
-             (200, 200, 200), 6, cv2.LINE_AA)
-    return cv2.addWeighted(overlay, 0.55, frame, 0.45, 0)
+# ------------------------------------------------------------ wall visuals
+
+def brick_texture(w, h):
+    """Foam-brick wall texture, prebuilt once."""
+    img = np.full((h, w, 3), (190, 150, 60), np.uint8)
+    step = max(36, h // 12)
+    for y in range(0, h, step):
+        cv2.line(img, (0, y), (w, y), (160, 122, 42), 2)
+        off = step if (y // step) % 2 else 0
+        for x in range(off, w, step * 2):
+            cv2.line(img, (x, y), (x, y + step), (160, 122, 42), 2)
+    return img
 
 
-def draw_wall(frame, progress):
-    """Draw the approaching wall: a border that thickens as time runs out."""
+def person_hole_mask(shape, body, ghost):
+    """Person-shaped hole (255 = hole) sized to the player's proportions."""
+    h, w = shape[:2]
+    mask = np.zeros((h, w), np.uint8)
+    lsh, rsh = body['l_shoulder'], body['r_shoulder']
+    c = (lsh + rsh) / 2
+    half = max(float(np.linalg.norm(rsh - lsh)) / 2, 25.0)
+
+    def pt(p):
+        return tuple(np.round(p).astype(int))
+
+    cv2.circle(mask, pt(c + [0, -1.55 * half]), int(0.95 * half), 255, -1)  # head
+    cv2.rectangle(mask, pt(c + [-1.3 * half, -0.35 * half]),
+                  pt(c + [1.3 * half, 3.1 * half]), 255, -1)                # torso
+    for s in (-1, 1):                                                       # legs
+        cv2.line(mask, pt(c + [s * 0.62 * half, 3.0 * half]),
+                 pt(c + [s * 0.95 * half, 5.6 * half]), 255, int(0.95 * half))
+    for s in ('l', 'r'):                                                    # arms
+        sh, el, wr = ghost[s + '_shoulder'], ghost[s + '_elbow'], ghost[s + '_wrist']
+        cv2.line(mask, pt(sh), pt(el), 255, int(0.85 * half))
+        cv2.line(mask, pt(el), pt(wr), 255, int(0.85 * half))
+        cv2.circle(mask, pt(wr), int(0.55 * half), 255, -1)                 # hands
+    return mask
+
+
+def composite_wall(frame, wall, mask, scale, rim_color):
+    """Draw the wall over the camera at the given approach scale.
+
+    scale < 1: wall is far — drawn small and centered, camera visible around it.
+    scale = 1: wall fills the frame; camera only visible through the hole.
+    scale > 1: flying through — wall zooms past, hole grows around the player.
+    """
     h, w = frame.shape[:2]
-    # Border grows from the edges toward an inner window as progress -> 1.
-    max_inset = int(0.13 * min(h, w))
-    inset = int(max_inset * progress)
-    color = (140, 120, 60) if progress < 0.8 else (60, 60, 255)
-    if inset > 0:
-        cv2.rectangle(frame, (0, 0), (w, inset), color, -1)              # top
-        cv2.rectangle(frame, (0, h - inset), (w, h), color, -1)          # bottom
-        cv2.rectangle(frame, (0, 0), (inset, h), color, -1)              # left
-        cv2.rectangle(frame, (w - inset, 0), (w, h), color, -1)          # right
-    cv2.rectangle(frame, (inset, inset), (w - inset, h - inset), color, 3)
+    if scale < 1.0:
+        sw, sh = max(2, int(w * scale)), max(2, int(h * scale))
+        wall_s = cv2.resize(wall, (sw, sh), interpolation=cv2.INTER_AREA)
+        mask_s = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+        x0, y0 = (w - sw) // 2, (h - sh) // 2
+        region = frame[y0:y0 + sh, x0:x0 + sw]
+    else:
+        zw, zh = int(w * scale), int(h * scale)
+        wall_z = cv2.resize(wall, (zw, zh), interpolation=cv2.INTER_LINEAR)
+        mask_z = cv2.resize(mask, (zw, zh), interpolation=cv2.INTER_NEAREST)
+        cx0, cy0 = (zw - w) // 2, (zh - h) // 2
+        wall_s = wall_z[cy0:cy0 + h, cx0:cx0 + w]
+        mask_s = mask_z[cy0:cy0 + h, cx0:cx0 + w]
+        region = frame
+
+    solid = mask_s == 0
+    region[solid] = wall_s[solid]
+    contours, _ = cv2.findContours(mask_s, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(region, contours, -1, rim_color, 3, cv2.LINE_AA)
     return frame
+
+
+# ------------------------------------------------------------------- juice
+
+class SoundPlayer:
+    """Fire-and-forget system sounds via afplay (silently disabled if absent)."""
+
+    NAMES = {'tick': 'Tink', 'go': 'Ping', 'pass': 'Glass', 'perfect': 'Hero',
+             'crash': 'Basso', 'gameover': 'Submarine'}
+
+    def __init__(self):
+        self.paths = {}
+        for key, name in self.NAMES.items():
+            p = f'/System/Library/Sounds/{name}.aiff'
+            if os.path.exists(p):
+                self.paths[key] = p
+
+    def play(self, key):
+        p = self.paths.get(key)
+        if p:
+            subprocess.Popen(['afplay', p], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+
+
+class Particles:
+    """Brick chunks that burst out on a crash."""
+
+    def __init__(self):
+        self.parts = []
+
+    def burst(self, center, n=30):
+        for _ in range(n):
+            ang = np.random.uniform(0, 2 * np.pi)
+            speed = np.random.uniform(150, 650)
+            self.parts.append({
+                'p': np.array(center, float),
+                'v': np.array([np.cos(ang), -abs(np.sin(ang))]) * speed,
+                's': np.random.randint(5, 14),
+                'c': (int(np.random.uniform(150, 200)),
+                      int(np.random.uniform(110, 160)),
+                      int(np.random.uniform(40, 80))),
+                't': np.random.uniform(0.5, 1.0),
+            })
+
+    def step_draw(self, frame, dt):
+        h, w = frame.shape[:2]
+        alive = []
+        for part in self.parts:
+            part['t'] -= dt
+            if part['t'] <= 0:
+                continue
+            part['v'][1] += 1400 * dt
+            part['p'] += part['v'] * dt
+            x, y = int(part['p'][0]), int(part['p'][1])
+            if -20 < x < w + 20 and -20 < y < h + 20:
+                s = part['s']
+                cv2.rectangle(frame, (x - s // 2, y - s // 2),
+                              (x + s // 2, y + s // 2), part['c'], -1)
+            alive.append(part)
+        self.parts = alive
 
 
 def _outlined(frame, text, org, scale, color, thickness):
@@ -216,35 +277,263 @@ def _outlined(frame, text, org, scale, color, thickness):
                 color, thickness, cv2.LINE_AA)
 
 
-def draw_hud(frame, game, match, now):
-    """Score, streak, pose name, countdown and match meter."""
-    h, w = frame.shape[:2]
-    left = game.time_left(now)
+def _centered(frame, text, y, scale, color, thickness):
+    (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+    _outlined(frame, text, ((frame.shape[1] - tw) // 2, y), scale, color, thickness)
 
-    (tw, _), _ = cv2.getTextSize(game.pose['name'], cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
-    _outlined(frame, game.pose['name'], ((w - tw) // 2, 46), 1.1, (255, 255, 255), 3)
-    _outlined(frame, f'{left:.1f}s', (w // 2 - 34, 86), 0.9,
-              (255, 255, 255) if left > 2 else (80, 80, 255), 2)
-    _outlined(frame, f'SCORE {game.score}   STREAK {game.streak}', (16, 34),
-              0.7, (80, 230, 120), 2)
 
-    # Match meter along the bottom.
-    if match is not None:
-        bar_w = int((w - 200) * match)
-        color = (80, 230, 120) if match >= PASS_THRESHOLD else (60, 140, 255)
-        cv2.rectangle(frame, (100, h - 42), (100 + bar_w, h - 22), color, -1)
-        cv2.rectangle(frame, (100, h - 42), (w - 100, h - 22), (200, 200, 200), 2)
-        pass_x = 100 + int((w - 200) * PASS_THRESHOLD)
-        cv2.line(frame, (pass_x, h - 48), (pass_x, h - 16), (255, 255, 255), 2)
-        cv2.putText(frame, f'{match * 100:.0f}%', (16, h - 24),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+def draw_heart(img, c, s, color, filled=True):
+    pts = np.array([[c[0] - s, c[1] - s // 4], [c[0] + s, c[1] - s // 4],
+                    [c[0], c[1] + s]])
+    if filled:
+        cv2.circle(img, (c[0] - s // 2, c[1] - s // 4), s // 2 + 1, color, -1, cv2.LINE_AA)
+        cv2.circle(img, (c[0] + s // 2, c[1] - s // 4), s // 2 + 1, color, -1, cv2.LINE_AA)
+        cv2.fillPoly(img, [pts], color, cv2.LINE_AA)
     else:
-        cv2.putText(frame, 'Step back so both arms are visible', (100, h - 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2, cv2.LINE_AA)
+        cv2.circle(img, (c[0] - s // 2, c[1] - s // 4), s // 2 + 1, color, 2, cv2.LINE_AA)
+        cv2.circle(img, (c[0] + s // 2, c[1] - s // 4), s // 2 + 1, color, 2, cv2.LINE_AA)
+        cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
 
-    if game.result and now < game.result[2]:
-        text, color, _ = game.result
-        _outlined(frame, text, (w // 2 - 160, h // 2), 2.0, color, 5)
+
+def draw_ghost(frame, ghost, seg_ok):
+    """Target skeleton on the player: matched segments green, others orange."""
+    overlay = frame.copy()
+    for a, b, key in SEGMENTS:
+        color = (80, 230, 120) if seg_ok.get(key) else (60, 140, 255)
+        cv2.line(overlay, tuple(np.round(ghost[a]).astype(int)),
+                 tuple(np.round(ghost[b]).astype(int)), color, 10, cv2.LINE_AA)
+        cv2.circle(overlay, tuple(np.round(ghost[b]).astype(int)), 8, color, -1, cv2.LINE_AA)
+    return cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
+
+
+# -------------------------------------------------------------------- game
+
+class HoleInWallGame:
+    """State machine: COUNTDOWN -> WALL -> RESULT -> (WALL | GAME_OVER)."""
+
+    def __init__(self, now):
+        self.high_score = self._load_high_score()
+        self.sounds = SoundPlayer()
+        self.particles = Particles()
+        self.popups = []          # (text, x, y, color, t0)
+        self.reset(now)
+
+    # -- persistence
+    def _load_high_score(self):
+        try:
+            with open(HIGHSCORE_PATH) as f:
+                return int(json.load(f).get('high_score', 0))
+        except (OSError, ValueError):
+            return 0
+
+    def _save_high_score(self):
+        try:
+            os.makedirs(os.path.dirname(HIGHSCORE_PATH), exist_ok=True)
+            with open(HIGHSCORE_PATH, 'w') as f:
+                json.dump({'high_score': self.high_score}, f)
+        except OSError:
+            pass
+
+    # -- lifecycle
+    def reset(self, now):
+        self.state = 'COUNTDOWN'
+        self.state_t0 = now
+        self.lives = START_LIVES
+        self.score = 0
+        self.walls_passed = 0
+        self.streak = 0
+        self.round_time = ROUND_TIME
+        self.pose = None
+        self.deadline = None
+        self.result = None        # ('pass'|'crash', match)
+        self.new_record = False
+        self._order = []
+        self._last_tick = None
+
+    @property
+    def level(self):
+        return self.walls_passed // 3 + 1
+
+    @property
+    def multiplier(self):
+        return min(1 + self.streak // 2, 5)
+
+    def _pool(self):
+        return POSES[:EASY_POOL] if self.level == 1 else POSES
+
+    def new_wall(self, now):
+        pool = self._pool()
+        if not self._order:
+            self._order = np.random.permutation(len(pool)).tolist()
+        idx = self._order.pop(0)
+        if self.pose is not None and pool[idx % len(pool)] is self.pose and self._order:
+            self._order.append(idx)
+            idx = self._order.pop(0)
+        self.pose = pool[idx % len(pool)]
+        self.deadline = now + self.round_time
+        self.state = 'WALL'
+        self.state_t0 = now
+
+    def time_left(self, now):
+        return max(0.0, (self.deadline or now) - now)
+
+    def progress(self, now):
+        return min(max(1.0 - self.time_left(now) / self.round_time, 0.0), 1.0)
+
+    def update(self, match, now, body):
+        """Advance the state machine. Returns the frame's outcome event or None."""
+        if self.state == 'COUNTDOWN':
+            elapsed = now - self.state_t0
+            remaining = COUNTDOWN_SECS - int(elapsed)
+            if remaining != self._last_tick:
+                self._last_tick = remaining
+                self.sounds.play('go' if remaining <= 0 else 'tick')
+            if elapsed >= COUNTDOWN_SECS + 0.6:
+                self.new_wall(now)
+            return None
+
+        if self.state == 'WALL':
+            if self.time_left(now) > 0:
+                return None
+            if match is not None and match >= PASS_THRESHOLD:
+                self.walls_passed += 1
+                self.streak += 1
+                points = 100 * self.multiplier
+                perfect = match >= PERFECT_MATCH
+                if perfect:
+                    points += 50
+                self.score += points
+                self.round_time = max(ROUND_TIME_MIN, self.round_time - ROUND_TIME_STEP)
+                self.result = ('pass', match)
+                self.sounds.play('perfect' if perfect else 'pass')
+                anchor = body['l_shoulder'] if body else (FRAME_W // 2, 150)
+                self.popups.append(
+                    (f'+{points}' + (' PERFECT!' if perfect else ''),
+                     int(anchor[0]), int(anchor[1]) - 60, (80, 230, 120), now))
+                outcome = 'pass'
+            else:
+                self.lives -= 1
+                self.streak = 0
+                self.result = ('crash', match or 0.0)
+                self.sounds.play('crash')
+                c = body['l_shoulder'] + (body['r_shoulder'] - body['l_shoulder']) / 2 \
+                    if body else np.array([FRAME_W / 2, FRAME_H / 2])
+                self.particles.burst(c)
+                outcome = 'crash'
+            self.state = 'RESULT'
+            self.state_t0 = now
+            return outcome
+
+        if self.state == 'RESULT':
+            if now - self.state_t0 >= RESULT_SECS:
+                if self.lives <= 0:
+                    self.state = 'GAME_OVER'
+                    self.state_t0 = now
+                    self.new_record = self.score > self.high_score
+                    if self.new_record:
+                        self.high_score = self.score
+                        self._save_high_score()
+                    self.sounds.play('gameover')
+                else:
+                    self.new_wall(now)
+            return None
+
+        return None  # GAME_OVER waits for SPACE
+
+
+# --------------------------------------------------------------- rendering
+
+def render(frame, game, body, ghost, match, seg_ok, wall_texture, now):
+    """Compose the full game frame for the current state."""
+    h, w = frame.shape[:2]
+    anchor = body if body is not None else default_body(w, h)
+
+    if game.state == 'WALL' or (game.state == 'RESULT' and game.result[0] == 'pass'):
+        hole_ghost = ghost if ghost is not None else ghost_points(anchor, game.pose['angles'])
+        mask = person_hole_mask(frame.shape, anchor, hole_ghost)
+        if game.state == 'WALL':
+            p = game.progress(now)
+            scale = 0.22 + 0.78 * p ** 2.2      # accelerates as it gets close
+        else:
+            t = (now - game.state_t0) / RESULT_SECS
+            scale = 1.0 + 2.2 * t ** 1.5        # flying through
+        rim = (80, 230, 120) if (match or 0) >= PASS_THRESHOLD else (245, 245, 245)
+        frame = composite_wall(frame, wall_texture, mask, scale, rim)
+
+    if ghost is not None and game.state == 'WALL':
+        frame = draw_ghost(frame, ghost, seg_ok)
+
+    # crash effects: shake + red flash + bricks
+    if game.state == 'RESULT' and game.result[0] == 'crash':
+        t = (now - game.state_t0) / RESULT_SECS
+        amp = max(0.0, 1.0 - t * 2) * 14
+        if amp > 0.5:
+            dx, dy = np.random.uniform(-amp, amp, 2)
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            frame = cv2.warpAffine(frame, M, (w, h))
+        flash = max(0.0, 0.55 - t)
+        if flash > 0:
+            red = np.full_like(frame, (40, 40, 220))
+            frame = cv2.addWeighted(red, flash, frame, 1 - flash, 0)
+        _centered(frame, 'CRASHED!', h // 2, 2.2, (60, 60, 255), 5)
+    game.particles.step_draw(frame, 1 / 30)
+
+    if game.state == 'RESULT' and game.result[0] == 'pass':
+        _centered(frame, 'THROUGH!', h // 2, 2.2, (80, 230, 120), 5)
+
+    # floating score popups
+    keep = []
+    for text, x, y, color, t0 in game.popups:
+        age = now - t0
+        if age < 1.1:
+            _outlined(frame, text, (x, int(y - 45 * age)), 0.9, color, 2)
+            keep.append((text, x, y, color, t0))
+    game.popups = keep
+
+    # state overlays
+    if game.state == 'COUNTDOWN':
+        n = COUNTDOWN_SECS - int(now - game.state_t0)
+        text = str(n) if n > 0 else 'GO!'
+        pulse = 1.0 - (now - game.state_t0) % 1.0
+        _centered(frame, text, h // 2, 2.5 + 1.5 * pulse, (255, 255, 255), 6)
+        _centered(frame, 'Get ready...', h // 2 + 60, 0.9, (200, 200, 200), 2)
+
+    elif game.state == 'GAME_OVER':
+        dark = (frame * 0.35).astype(np.uint8)
+        frame = dark
+        _centered(frame, 'GAME OVER', h // 2 - 70, 2.2, (60, 60, 255), 5)
+        _centered(frame, f'SCORE  {game.score}', h // 2, 1.3, (255, 255, 255), 3)
+        hs_color = (80, 230, 120) if game.new_record else (200, 200, 200)
+        hs_text = f'NEW HIGH SCORE!  {game.high_score}' if game.new_record \
+            else f'HIGH SCORE  {game.high_score}'
+        _centered(frame, hs_text, h // 2 + 45, 1.0, hs_color, 2)
+        _centered(frame, 'press SPACE to play again', h // 2 + 100, 0.8, (200, 200, 200), 2)
+
+    # HUD
+    if game.state in ('WALL', 'RESULT', 'COUNTDOWN'):
+        for i in range(START_LIVES):
+            draw_heart(frame, (30 + i * 42, 34), 14, (70, 70, 235), filled=i < game.lives)
+        _outlined(frame, f'SCORE {game.score}', (16, 80), 0.75, (255, 255, 255), 2)
+        _outlined(frame, f'LVL {game.level}  x{game.multiplier}', (16, 110), 0.65,
+                  (60, 200, 255), 2)
+
+    if game.state == 'WALL':
+        _centered(frame, game.pose['name'], 40, 1.0, (255, 255, 255), 3)
+        left = game.time_left(now)
+        _centered(frame, f'{left:.1f}s', 76, 0.85,
+                  (255, 255, 255) if left > 2 else (80, 80, 255), 2)
+        if match is not None:
+            bar_w = int((w - 240) * match)
+            color = (80, 230, 120) if match >= PASS_THRESHOLD else (60, 140, 255)
+            cv2.rectangle(frame, (120, h - 38), (120 + bar_w, h - 20), color, -1)
+            cv2.rectangle(frame, (120, h - 38), (w - 120, h - 20), (220, 220, 220), 2)
+            px = 120 + int((w - 240) * PASS_THRESHOLD)
+            cv2.line(frame, (px, h - 44), (px, h - 14), (255, 255, 255), 2)
+            _outlined(frame, f'{match * 100:.0f}%', (26, h - 22), 0.7, color, 2)
+        else:
+            _centered(frame, 'Step back so both arms are visible', h - 24, 0.7,
+                      (0, 220, 255), 2)
+
     return frame
 
 
@@ -252,6 +541,7 @@ def main():
     pose_det = PoseDetector(confidence=0.5, model_complexity=1)
     filters = {name: OneEuroFilter(FILTER_MIN_CUTOFF, FILTER_BETA)
                for name in PoseDetector.BODY}
+    wall_texture = brick_texture(FRAME_W, FRAME_H)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -259,55 +549,54 @@ def main():
         return
 
     game = HoleInWallGame(time.time())
-    print('Hole in the Wall - match the ghost pose before the wall arrives! (s=skip, q=quit)')
+    print('Hole in the Wall - fit through the hole! (s=skip, SPACE=restart, q=quit)')
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            frame = cv2.flip(frame, 1)
-            frame_h, frame_w = frame.shape[:2]
+            frame = cv2.resize(cv2.flip(frame, 1), (FRAME_W, FRAME_H))
             now = time.time()
 
             results = pose_det.detect(frame)
-            body = pose_det.get_body(results, frame_w, frame_h)
+            body = pose_det.get_body(results, FRAME_W, FRAME_H)
 
-            match, seg_ok = None, {}
+            match, seg_ok, ghost = None, {}, None
             if body is not None:
                 for name in PoseDetector.BODY:
                     body[name] = filters[name].apply(body[name])
-                match, seg_ok = match_pose(body, game.pose['angles'])
-                shoulders_ok = (body['l_shoulder_vis'] > VIS_THRESHOLD and
-                                body['r_shoulder_vis'] > VIS_THRESHOLD)
-                if shoulders_ok:
-                    ghost = ghost_points(body, game.pose['angles'])
-                    frame = draw_ghost(frame, ghost, seg_ok)
+                if game.pose is not None:
+                    match, seg_ok = match_pose(body, game.pose['angles'])
+                    shoulders_ok = (body['l_shoulder_vis'] > VIS_THRESHOLD and
+                                    body['r_shoulder_vis'] > VIS_THRESHOLD)
+                    if shoulders_ok:
+                        ghost = ghost_points(body, game.pose['angles'])
             else:
                 for f in filters.values():
                     f.reset()
 
-            progress = 1.0 - game.time_left(now) / game.round_time
-            frame = draw_wall(frame, min(max(progress, 0.0), 1.0))
-            outcome = game.update(match, now)
+            outcome = game.update(match, now, body)
             if outcome:
-                print(f"{game.pose['name']:<20} <- next | last round: {outcome.upper()} "
-                      f"| score {game.score} streak {game.streak}")
-            frame = draw_hud(frame, game, match, now)
+                print(f'{outcome.upper():>6}: score {game.score}  lives {game.lives}  '
+                      f'level {game.level}')
 
+            frame = render(frame, game, body, ghost, match, seg_ok, wall_texture, now)
             cv2.imshow('Hole in the Wall', frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            elif key == ord('s'):
-                game.new_round(now)
+            elif key == ord('s') and game.state == 'WALL':
+                game.new_wall(now)
+            elif key == ord(' ') and game.state == 'GAME_OVER':
+                game.reset(now)
 
     finally:
         cap.release()
         cv2.destroyAllWindows()
         pose_det.close()
-        print(f'Final score: {game.score}')
+        print(f'Final score: {game.score}  (high score: {game.high_score})')
 
 
 if __name__ == '__main__':
