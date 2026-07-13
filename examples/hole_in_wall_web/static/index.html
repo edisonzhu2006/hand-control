@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hole in the Wall</title>
+<link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Rubik:wght@600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0a14; overflow: hidden;
+               display: flex; align-items: center; justify-content: center; }
+  #wrap { position: relative; }
+  canvas { display: block; border-radius: 8px; }
+  #pip { position: absolute; top: 12px; right: 12px; width: 208px; height: 117px;
+         border: 2px solid rgba(255,255,255,.7); border-radius: 6px; z-index: 5;
+         background: #000; }
+  #piplabel { position: absolute; top: 132px; right: 14px; color: #ccc;
+              font: 12px Rubik, sans-serif; z-index: 5; }
+  #hint { position: absolute; bottom: 6px; left: 12px; color: #667;
+          font: 12px Rubik, sans-serif; z-index: 5; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <img id="pip" alt="">
+  <div id="piplabel">camera</div>
+  <div id="hint">click for sound &nbsp;|&nbsp; S skip &nbsp;|&nbsp; SPACE restart</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js-legacy@7.4.2/dist/pixi-legacy.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi-filters@5.3.0/dist/browser/pixi-filters.min.js"></script>
+<script src="/static/game.js"></script>
+</body>
+</html>

@@ -32,3 +32,4 @@ Thumbs.db
 .pytest_cache/
 .coverage
 data/hole_in_wall_highscore.json
+.gstack/
