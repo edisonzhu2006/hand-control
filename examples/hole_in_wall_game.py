@@ -556,7 +556,9 @@ def main():
             now = time.time()
 
             results = pose_det.detect(cam)
-            body = pose_det.get_body(results, FRAME_W, FRAME_H)
+            # Frame is selfie-mirrored, so swap l/r to screen-side semantics —
+            # the arm you see on the left drives the avatar's left arm.
+            body = pose_det.get_body(results, FRAME_W, FRAME_H, mirrored=True)
 
             match, seg_ok = None, {}
             if body is not None:

@@ -95,13 +95,17 @@ class PoseDetector:
         'l_ankle': 27, 'r_ankle': 28,
     }
 
-    def get_body(self, results, frame_w, frame_h):
-        """Extract both arms and hips as pixel coordinates.
+    def get_body(self, results, frame_w, frame_h, mirrored=False):
+        """Extract head, arms and legs as pixel coordinates.
 
         Args:
             results: MediaPipe pose results.
             frame_w: Frame width.
             frame_h: Frame height.
+            mirrored: Set True when detection ran on a horizontally flipped
+                (selfie-mirror) frame. MediaPipe labels sides by the image
+                person's anatomy, which is opposite to screen side in a
+                mirrored frame — this swaps l_/r_ so keys mean screen side.
 
         Returns:
             A dict mapping each BODY key to an (x, y) pixel array plus a
@@ -113,6 +117,11 @@ class PoseDetector:
         lms = results.pose_landmarks.landmark
         body = {}
         for name, idx in self.BODY.items():
+            if mirrored:
+                if name.startswith('l_'):
+                    name = 'r_' + name[2:]
+                elif name.startswith('r_'):
+                    name = 'l_' + name[2:]
             lm = lms[idx]
             body[name] = np.array([lm.x * frame_w, lm.y * frame_h], dtype=float)
             body[name + '_vis'] = float(lm.visibility)
