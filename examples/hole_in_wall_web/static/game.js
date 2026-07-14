@@ -468,16 +468,55 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
     // mouth: draw the player's real lip contour when available
     const face = live && live.face ? live.face : null;
     const my = j.head[1] + r * 0.38;
-    if (face && face.mouth && face.mouth.length > 4) {
-      const ms = r * 2.3;   // lip ring is normalized by face width
-      const px = face.mouth.map(pt => [ex + pt[0] * ms, my + pt[1] * ms]);
-      const openMouth = (face.open || 0) > 0.18;
-      g.lineStyle({ width: 2.5, color: 0x23232b, join: PIXI.LINE_JOIN.ROUND });
-      if (openMouth) g.beginFill(0x361a1a);
-      g.moveTo(...px[0]);
-      for (let i = 1; i < px.length; i++) g.lineTo(...px[i]);
-      g.closePath();
-      if (openMouth) g.endFill();
+    if (face && face.mouth && face.mouth.o) {
+      // volumetric lips: shadow -> lip body -> interior -> teeth -> highlight
+      const ms = r * 2.3;   // lip rings are normalized by face width
+      const toPx = (ring, dy = 0) =>
+        ring.flatMap(pt => [ex + pt[0] * ms, my + pt[1] * ms + dy]);
+      const outer = toPx(face.mouth.o);
+      const inner = toPx(face.mouth.i);
+
+      g.beginFill(0x000000, 0.14).drawPolygon(toPx(face.mouth.o, r * 0.06)).endFill();
+      g.lineStyle({ width: 2, color: 0x8a4a42, join: PIXI.LINE_JOIN.ROUND });
+      g.beginFill(0xc9847a).drawPolygon(outer).endFill();
+      g.lineStyle(0);
+
+      const openAmt = face.open || 0;
+      if (openAmt > 0.12) {
+        // interior only when the jaw is actually open (the landmark ring
+        // never fully collapses, so unconditional fill reads as a slit)
+        const a = Math.min(1, (openAmt - 0.12) / 0.15);
+        g.beginFill(0x2a1114, a).drawPolygon(inner).endFill();
+      } else {
+        // closed: draw the lip seam instead
+        g.lineStyle({ width: 1.8, color: 0x7a4038, alpha: 0.9,
+          join: PIXI.LINE_JOIN.ROUND });
+        g.moveTo(inner[0], inner[1]);
+        for (let i = 2; i < inner.length; i += 2) g.lineTo(inner[i], inner[i + 1]);
+        g.closePath();
+        g.lineStyle(0);
+      }
+      if (openAmt > 0.22) {
+        // teeth hint clipped to the top of the inner mouth
+        let ix0 = 1e9, ix1 = -1e9, iy0 = 1e9, iy1 = -1e9;
+        for (let i = 0; i < inner.length; i += 2) {
+          ix0 = Math.min(ix0, inner[i]); ix1 = Math.max(ix1, inner[i]);
+          iy0 = Math.min(iy0, inner[i + 1]); iy1 = Math.max(iy1, inner[i + 1]);
+        }
+        const tw = (ix1 - ix0) * 0.62;
+        const th = Math.min((iy1 - iy0) * 0.34, r * 0.12);
+        g.beginFill(0xf5f1e8, 0.95)
+          .drawRoundedRect((ix0 + ix1) / 2 - tw / 2, iy0 + 1, tw, th, th / 2)
+          .endFill();
+      }
+      // lower-lip highlight for roundness (bottom arc of the outer ring)
+      g.lineStyle({ width: 2, color: 0xf2d9cd, alpha: 0.7,
+        cap: PIXI.LINE_CAP.ROUND });
+      const lo = face.mouth.o;
+      g.moveTo(ex + lo[11][0] * ms, my + lo[11][1] * ms + 1.5);
+      for (let i = 12; i <= 15; i++) {
+        g.lineTo(ex + lo[i][0] * ms, my + lo[i][1] * ms + 1.5);
+      }
       g.lineStyle(0);
     } else {
       const smile = face ? face.smile : 0;

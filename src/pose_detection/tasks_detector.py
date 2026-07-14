@@ -49,9 +49,11 @@ GESTURE_MAP = {
 FACE_SMOOTH = 0.45       # EMA factor for expression scores
 GESTURE_VOTES = 5        # majority-vote window per hand
 
-# Outer-lip ring (canonical face-mesh topology, ordered for a closed polygon).
+# Lip rings (canonical face-mesh topology, ordered for closed polygons).
 LIP_RING = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
             291, 375, 321, 405, 314, 17, 84, 181, 91, 146]
+LIP_INNER = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415,
+             308, 324, 318, 402, 317, 14, 87, 178, 88, 95]
 FACE_CHEEK_L, FACE_CHEEK_R = 234, 454
 
 
@@ -173,12 +175,16 @@ class TasksDetector(PoseDetector):
         if res.face_landmarks:
             h, w = frame_shape[:2]
             lms = res.face_landmarks[0]
-            ring = np.array([[lms[i].x * w, lms[i].y * h] for i in LIP_RING])
+            outer = np.array([[lms[i].x * w, lms[i].y * h] for i in LIP_RING])
+            inner = np.array([[lms[i].x * w, lms[i].y * h] for i in LIP_INNER])
             face_w = float(np.linalg.norm(
                 np.array([lms[FACE_CHEEK_R].x * w, lms[FACE_CHEEK_R].y * h]) -
                 np.array([lms[FACE_CHEEK_L].x * w, lms[FACE_CHEEK_L].y * h]))) or 1.0
-            center = ring.mean(axis=0)
-            self._mouth = np.round((ring - center) / face_w, 3).tolist()
+            center = outer.mean(axis=0)
+            self._mouth = {
+                'o': np.round((outer - center) / face_w, 3).tolist(),
+                'i': np.round((inner - center) / face_w, 3).tolist(),
+            }
 
     def _detect_gestures(self, mp_img, shape):
         res = self.gesture_rec.recognize_for_video(mp_img, self._ts_ms)
