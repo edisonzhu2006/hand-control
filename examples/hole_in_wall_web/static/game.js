@@ -252,6 +252,7 @@ function project3d(P, anchor) {
   const k = SM.shW / Math.max(0.22, sw);
   const j = {}, dz = {};
   const put = (key, w) => {
+    if (!w) return;   // joint filtered out (occluded / out of frame)
     const rel = [w[0] - shc[0], w[1] - shc[1], w[2] - shc[2]];
     const d = Math.max(0.7, Math.min(1.45, F / Math.max(0.5, F + rel[2])));
     j[key] = [anchor.x + rel[0] * k * d, anchor.y + rel[1] * k * d];
@@ -266,13 +267,17 @@ function project3d(P, anchor) {
     if (P[name]) put(kk, P[name]);
   }
   j.sc = [anchor.x, anchor.y]; dz.sc = 1;
-  j.hipc = [(j.lHip[0] + j.rHip[0]) / 2, (j.lHip[1] + j.rHip[1]) / 2];
-  dz.hipc = (dz.lHip + dz.rHip) / 2;
-  const nr = [P.nose[0] - shc[0], P.nose[1] - shc[1], P.nose[2] - shc[2]];
-  const nd = Math.max(0.75, Math.min(1.4, F / Math.max(0.5, F + nr[2])));
-  dz.head = nd;
-  j.head = [anchor.x + nr[0] * k * nd * 0.55,
-            anchor.y + nr[1] * k * nd * 0.75 - SM.headR * 0.35];
+  if (j.lHip && j.rHip) {
+    j.hipc = [(j.lHip[0] + j.rHip[0]) / 2, (j.lHip[1] + j.rHip[1]) / 2];
+    dz.hipc = (dz.lHip + dz.rHip) / 2;
+  }
+  if (P.nose) {
+    const nr = [P.nose[0] - shc[0], P.nose[1] - shc[1], P.nose[2] - shc[2]];
+    const nd = Math.max(0.75, Math.min(1.4, F / Math.max(0.5, F + nr[2])));
+    dz.head = nd;
+    j.head = [anchor.x + nr[0] * k * nd * 0.55,
+              anchor.y + nr[1] * k * nd * 0.75 - SM.headR * 0.35];
+  }
   return { j, dz };
 }
 
@@ -400,12 +405,18 @@ function ensureWall(state) {
 function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   g.clear();
   let j, dz = {};
-  if (live && live.p3 && live.p3.l_shoulder) {
-    const pr = project3d(live.p3, anchor);
-    j = pr.j; dz = pr.dz;
-    if (!j.lKn) {   // legs not tracked: borrow the relaxed 2D stance
-      const j2 = skeleton(anchor, pose);
-      for (const kk of ['lKn', 'lAn', 'rKn', 'rAn']) { j[kk] = j2[kk]; dz[kk] = 1; }
+  if (live && live.p3 && live.p3.l_shoulder && live.p3.r_shoulder) {
+    try {
+      const pr = project3d(live.p3, anchor);
+      j = pr.j; dz = pr.dz;
+    } catch (e) { j = null; }
+    // any joint the 3D pass is missing falls back to the relaxed 2D stance
+    const j2 = skeleton(anchor, pose);
+    if (!j) { j = j2; dz = {}; }
+    else {
+      for (const kk of Object.keys(j2)) {
+        if (!j[kk]) { j[kk] = j2[kk]; dz[kk] = 1; }
+      }
     }
   } else {
     j = skeleton(anchor, pose);
