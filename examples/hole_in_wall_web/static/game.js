@@ -358,7 +358,7 @@ function ensureWall(state) {
 
 /* ------------------------------------------------------------- the avatar */
 
-function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
+function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   g.clear();
   const j = skeleton(anchor, pose);
   const t = SM.t;
@@ -394,9 +394,31 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
   }
   g.lineStyle(0);
 
-  // hands / feet in the outline tone
-  for (const wr of ['lWr', 'rWr']) {
-    g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62).endFill();
+  // hands: draw the player's real hand skeleton, scaled to the avatar.
+  // Both live in the same mirrored screen space, so no rotation is needed.
+  const HAND_BONES = [
+    [0, 1], [1, 2], [2, 3], [3, 4],          // thumb
+    [0, 5], [5, 6], [6, 7], [7, 8],          // index
+    [5, 9], [9, 10], [10, 11], [11, 12],     // middle
+    [9, 13], [13, 14], [14, 15], [15, 16],   // ring
+    [13, 17], [17, 18], [18, 19], [19, 20],  // pinky
+    [0, 17],                                  // palm edge
+  ];
+  for (const [side, wr] of [['l', 'lWr'], ['r', 'rWr']]) {
+    const shape = live && live.shapes ? live.shapes[side] : null;
+    if (!shape) {
+      g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62).endFill();
+      continue;
+    }
+    const s = t * 1.05;   // wrist->middle-knuckle distance on the avatar
+    const px = (i) => [j[wr][0] + shape[i][0] * s, j[wr][1] + shape[i][1] * s];
+    g.lineStyle({ width: 5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND,
+      join: PIXI.LINE_JOIN.ROUND });
+    for (const [a, b] of HAND_BONES) {
+      g.moveTo(...px(a)).lineTo(...px(b));
+    }
+    g.lineStyle(0);
+    g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.34).endFill();
   }
   for (const [an, s] of [['lAn', -1], ['rAn', 1]]) {
     g.beginFill(COL.extremity)
@@ -430,13 +452,61 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
     }
     g.lineStyle(0);
   } else {
-    g.beginFill(0x23232b);
-    for (const s of [-1, 1]) g.drawCircle(ex + s * r / 3, ey, Math.max(2.2, r / 9));
-    g.endFill();
+    // eyes mirror the player's: dot when open, lid line when closed
+    const blinks = [live && live.face ? live.face.blinkL : 0,
+                    live && live.face ? live.face.blinkR : 0];
+    for (const [i, s] of [[0, -1], [1, 1]]) {
+      const cx = ex + s * r / 3;
+      if (blinks[i] > 0.5) {
+        g.lineStyle(3, 0x23232b);
+        g.moveTo(cx - r / 7, ey).lineTo(cx + r / 7, ey);
+        g.lineStyle(0);
+      } else {
+        g.beginFill(0x23232b).drawCircle(cx, ey, Math.max(2.2, r / 9)).endFill();
+      }
+    }
+    // mouth: draw the player's real lip contour when available
+    const face = live && live.face ? live.face : null;
+    const my = j.head[1] + r * 0.38;
+    if (face && face.mouth && face.mouth.length > 4) {
+      const ms = r * 2.3;   // lip ring is normalized by face width
+      const px = face.mouth.map(pt => [ex + pt[0] * ms, my + pt[1] * ms]);
+      const openMouth = (face.open || 0) > 0.18;
+      g.lineStyle({ width: 2.5, color: 0x23232b, join: PIXI.LINE_JOIN.ROUND });
+      if (openMouth) g.beginFill(0x361a1a);
+      g.moveTo(...px[0]);
+      for (let i = 1; i < px.length; i++) g.lineTo(...px[i]);
+      g.closePath();
+      if (openMouth) g.endFill();
+      g.lineStyle(0);
+    } else {
+      const smile = face ? face.smile : 0;
+      const open = face ? face.open : 0;
+      if (open > 0.25) {
+        g.lineStyle(3, 0x23232b).beginFill(0x361a1a)
+          .drawEllipse(ex, my, r * 0.2 + r * 0.1 * open, r * 0.32 * open)
+          .endFill().lineStyle(0);
+      } else if (smile > 0.12) {
+        g.lineStyle(3.2, 0x23232b);
+        const mr = r * (0.2 + 0.26 * smile);
+        const a0 = 0.2 * Math.PI, a1 = 0.8 * Math.PI;
+        g.moveTo(ex + mr * Math.cos(a0), my - r * 0.14 + mr * Math.sin(a0));
+        g.arc(ex, my - r * 0.14, mr, a0, a1);
+        g.lineStyle(0);
+      } else {
+        g.lineStyle(3, 0x23232b);
+        g.moveTo(ex - r * 0.16, my).lineTo(ex + r * 0.16, my);
+        g.lineStyle(0);
+      }
+    }
   }
 }
 
 /* --------------------------------------------------------------------- ui */
+
+function setText(obj, str) {
+  if (obj.text !== str) obj.text = str;
+}
 
 const FONT = '"Luckiest Guy", "Arial Black", sans-serif';
 const FONT_UI = '"Rubik", "Helvetica Neue", sans-serif';
@@ -480,6 +550,11 @@ const lockText = mkText(17, 0x7ce89a, 0x000000, 4, FONT_UI);
 lockText.anchor.set(0.5); lockText.position.set(W / 2, 236);
 uiLayer.addChild(lockText);
 
+// face/hand requirement indicators
+const reqText = mkText(16, 0xffffff, 0x000000, 4, FONT_UI);
+reqText.anchor.set(0.5); reqText.position.set(W / 2, 106);
+uiLayer.addChild(reqText);
+
 // game-over panel
 const overBg = new PIXI.Graphics();
 const overTitle = mkText(64, 0xff5555, 0x000000, 8);
@@ -494,7 +569,10 @@ overHigh.position.set(W / 2, H / 2 + 40); overMode.position.set(W / 2, H / 2 + 7
 overHint.position.set(W / 2, H / 2 + 116);
 ui.over.addChild(overBg, overTitle, overScore, overHigh, overMode, overHint);
 
+let lastHeartsKey = null;
 function drawHearts(lives) {
+  if (lives === lastHeartsKey) return;
+  lastHeartsKey = lives;
   const g = ui.heartsG;
   g.clear();
   for (let i = 0; i < 3; i++) {
@@ -520,7 +598,11 @@ function drawMeter(match, threshold = PASS_THRESHOLD) {
   g.lineStyle(2, 0xffffff, 0.9).moveTo(px, y - 5).lineTo(px, y + h + 5).lineStyle(0);
 }
 
+let lastChipKey = null;
 function drawChip(angles) {
+  const key = angles ? JSON.stringify(angles) : null;
+  if (key === lastChipKey) return;
+  lastChipKey = key;
   const g = ui.chipG;
   g.clear();
   if (!angles) return;
@@ -656,6 +738,10 @@ const SFX = {
   perfect: () => { [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.12, 'square', 0.09, i * 0.07)); },
   crash: () => { noiseBurst(0.3, 0.18); beep(90, 0.35, 'sawtooth', 0.16); },
   gameover: () => { [392, 330, 262, 196].forEach((f, i) => beep(f, 0.22, 'triangle', 0.1, i * 0.18)); },
+  cheer: () => {   // crowd swell: layered noise + a few whistles
+    noiseBurst(0.7, 0.10); noiseBurst(0.9, 0.07, 0.15);
+    [1568, 1760, 2093].forEach((f, i) => beep(f, 0.16, 'sine', 0.03, 0.1 + i * 0.12));
+  },
 };
 
 /* ------------------------------------------------------------- state + io */
@@ -677,6 +763,7 @@ function connect() {
       if (ev === 'crash') { shake = 1; flashA = 0.55; burst(W / 2, H * 0.5); }
       if (ev === 'pass' || ev === 'perfect') {
         pulse = 1;
+        if (ev === 'perfect' || S.mult >= 3) SFX.cheer();
         const gain = S.lastGain || { points: 100 * S.mult, perfect: ev === 'perfect', bonus: 0 };
         popup(`+${gain.points}${gain.perfect ? '  PERFECT!' : ''}`, W / 2, 150, 0x66ff99);
         if (gain.bonus >= 10) popup(`hold bonus +${gain.bonus}`, W / 2, 186, 0xa8e6ff);
@@ -701,6 +788,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { sendKey('restart'); e.preventDefault(); }
   if (e.key === 's') sendKey('skip');
   if (e.key === 'd') sendKey('daily');
+  if (e.key === 'Escape') sendKey('menu');
   if (e.key === 't') sendKey('toggle2p');
   if (e.key === 'l') sendKey('togglelegs');
   if (e.key === 'm') { audioOn = !audioOn; if (!audioOn) speechSynthesis?.cancel(); }
@@ -748,6 +836,7 @@ let bigPop = 1;
 let lastPoseName = '';
 let axSmooth = 0;
 let holeDxSmooth = 0;
+let prevState = '';
 
 app.ticker.add((dt) => {
   const dts = dt / 60;
@@ -781,11 +870,16 @@ app.ticker.add((dt) => {
   holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
-    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath });
+    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
+    { face: S.faceLive, shapes: S.handShapes });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
   if (S.state === 'WALL') {
+    if (prevState !== 'WALL') {
+      smoothScale = 0.22;                    // new wall starts at the horizon
+      if (wallSprite) wallSprite.alpha = 1;  // undo the fly-through fade
+    }
     ensureWall(S);
     const target = 0.22 + 0.78 * Math.pow(S.progress, 2.2);
     smoothScale += (target - smoothScale) * Math.min(1, dts * 14);
@@ -834,38 +928,48 @@ app.ticker.add((dt) => {
   ui.heartsG.visible = S.state !== 'MENU';
   if (S.twoP && S.players && S.players.length === 2) {
     const arrow = (i) => (S.activeP === i ? '> ' : '   ');
-    ui.score.text = S.state === 'MENU' ? '' :
-      `${arrow(0)}P1  ${S.players[0].score}   ${'\u2665'.repeat(S.players[0].lives)}`;
-    ui.score2.text = S.state === 'MENU' ? '' :
-      `${arrow(1)}P2  ${S.players[1].score}   ${'\u2665'.repeat(S.players[1].lives)}`;
+    setText(ui.score, S.state === 'MENU' ? '' :
+      `${arrow(0)}P1  ${S.players[0].score}   ${'\u2665'.repeat(S.players[0].lives)}`);
+    setText(ui.score2, S.state === 'MENU' ? '' :
+      `${arrow(1)}P2  ${S.players[1].score}   ${'\u2665'.repeat(S.players[1].lives)}`);
     ui.heartsG.visible = false;
   } else {
-    ui.score.text = S.state === 'MENU' ? '' : `SCORE ${S.score}`;
-    ui.score2.text = '';
+    setText(ui.score, S.state === 'MENU' ? '' : `SCORE ${S.score}`);
+    setText(ui.score2, '');
   }
-  ui.level.text = S.state === 'MENU' ? '' : `LVL ${S.level}   x${S.mult}`;
+  setText(ui.level, S.state === 'MENU' ? '' : `LVL ${S.level}   x${S.mult}`);
   ui.over.visible = false;
-  ui.big.text = ''; ui.sub.text = '';
-  ui.poseName.text = ''; ui.timer.text = '';
-  menuTitle.text = ''; menuSub.text = ''; menuHigh.text = '';
-  lockText.text = '';
+  setText(ui.big, ''); setText(ui.sub, '');
+  setText(ui.poseName, ''); setText(ui.timer, '');
+  setText(menuTitle, ''); setText(menuSub, ''); setText(menuHigh, '');
+  setText(lockText, ''); setText(reqText, '');
   drawMeter(null); drawChip(null);
 
   if (S.state === 'MENU') {
-    menuTitle.text = 'HOLE IN THE WALL';
+    setText(menuTitle, 'HOLE IN THE WALL');
     menuSub.text = 'SPACE - start    D - daily    ' +
       `T - 2 player: ${S.twoP ? 'ON' : 'OFF'}    ` +
       `L - leg mode: ${S.legMode ? 'ON' : 'OFF'}    M - mute`;
     menuHigh.text = `high score ${S.highScore}` +
       (S.dailyBest ? `    daily best ${S.dailyBest}` : '');
   } else if (S.state === 'HANDOFF') {
-    ui.big.text = `PLAYER ${S.activeP + 1} - GET READY!`;
+    setText(ui.big, `PLAYER ${S.activeP + 1} - GET READY!`);
     ui.sub.text = 'swap places!';
   }
 
   if (S.state === 'WALL') {
-    ui.poseName.text = S.poseName + (S.tight ? '  -  TIGHT x2!' : '');
-    ui.timer.text = `${S.timeLeft.toFixed(1)}s`;
+    setText(ui.poseName, S.poseName + (S.tight ? '  -  TIGHT x2!' : ''));
+    const reqs = [];
+    if (S.faceReq) {
+      reqs.push(`${S.faceReq === 'smile' ? 'SMILE' : 'WOW MOUTH'} ${S.segOk && S.segOk.face ? 'OK!' : '...'}`);
+    }
+    if (S.handsReq) {
+      reqs.push(`${S.handsReq.toUpperCase()} HANDS ${S.segOk && S.segOk.hands ? 'OK!' : '...'}`);
+    }
+    setText(reqText, reqs.join('    '));
+    reqText.style.fill = (S.segOk && ((S.faceReq && !S.segOk.face) ||
+      (S.handsReq && !S.segOk.hands))) ? 0xffc85c : 0x7ce89a;
+    setText(ui.timer, `${S.timeLeft.toFixed(1)}s`);
     ui.timer.style.fill = S.timeLeft > 2 ? 0xffffff : 0xff6666;
     drawMeter(S.match, S.passThreshold ?? PASS_THRESHOLD);
     drawChip(S.targetAngles);
@@ -884,12 +988,10 @@ app.ticker.add((dt) => {
       lockText.style.fill = 0x7ce89a;
     }
   } else if (S.state === 'COUNTDOWN') {
-    ui.big.text = S.countdown > 0 ? String(S.countdown) : 'GO!';
-    const pulse = 1 + 0.25 * (1 - ((S.countdown ?? 0) % 1));
-    ui.big.scale.set(1);
-    ui.sub.text = 'Mirror the stickman with your body';
+    setText(ui.big, S.countdown > 0 ? String(S.countdown) : 'GO!');
+    setText(ui.sub, 'Mirror the stickman with your body');
   } else if (S.state === 'RESULT') {
-    ui.big.text = S.outcome === 'pass' ? 'THROUGH!' : 'CRASHED!';
+    setText(ui.big, S.outcome === 'pass' ? 'THROUGH!' : 'CRASHED!');
     ui.big.style.fill = S.outcome === 'pass' ? 0x66ff99 : 0xff5555;
   } else if (S.state === 'GAME_OVER') {
     ui.over.visible = true;
@@ -920,4 +1022,5 @@ app.ticker.add((dt) => {
   bigPop = Math.min(1, bigPop + dts * 3.5);
   const over = 1 - bigPop;
   ui.big.scale.set(1 + 0.7 * over * over);
+  prevState = S.state;
 });

@@ -27,8 +27,9 @@ import cv2
 import numpy as np
 from aiohttp import web, WSMsgType
 
-sys.path.insert(0, '/Users/edison.zhu/hand-control')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.pose_detection.detector import PoseDetector
+from src.pose_detection.tasks_detector import TasksDetector
 from src.render.stickman import pose_from_body
 from src.utils.filters import OneEuroFilter
 from examples.hole_in_wall_game import (
@@ -66,7 +67,23 @@ WEB_POSES = POSES + [
     {'name': 'KICK RIGHT', 'angles': {'lu': 200, 'lf': 200, 'ru': 20, 'rf': 20},
      'legs': {'lt': -100, 'ls': -95, 'rt': -30, 'rs': -30}, 'needs_legs': True},
 ]
+WEB_POSES = WEB_POSES + [
+    {'name': 'T-POSE + SMILE', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'face': 'smile'},
+    {'name': 'ARMS UP + WOW', 'angles': {'lu': 135, 'lf': 135, 'ru': 45, 'rf': 45},
+     'face': 'wow'},
+    {'name': 'PEACE SIGNS', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
+     'hands': 'peace'},
+    {'name': 'FISTS UP', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
+     'hands': 'fist'},
+    {'name': 'HIGH FIVES', 'angles': {'lu': 155, 'lf': 100, 'ru': 25, 'rf': 80},
+     'hands': 'open'},
+    {'name': 'POINT + SMILE', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'hands': 'point', 'face': 'smile'},
+]
 LEG_POOL = [p for p in WEB_POSES if p.get('needs_legs')]
+DAILY_POOL = [p for p in WEB_POSES if not p.get('needs_legs')]
+FACE_HAND_POOL = [p for p in WEB_POSES if p.get('face') or p.get('hands')]
 
 
 def torso_angle(body):
@@ -198,15 +215,21 @@ class WebGame(HoleInWallGame):
         self._swapped = False
         self._last_px = 0.0
         self.px0 = 0.0
+        self._face = None
+        self._hands = None
 
     def note_legs(self, body, now):
         if legs_visible(body):
             self.legs_ok_until = now + 3.0
 
+    DAILY_POOL = None  # bound after module init; fixed so seeded RNGs agree
+
     def _pool(self, now=None):
         now = time.time() if now is None else now
         if self.leg_mode:
             return LEG_POOL
+        if self.mode == 'daily':
+            return WebGame.DAILY_POOL
         pool = WEB_POSES[:EASY_POOL] if self.level == 1 else WEB_POSES
         if now > self.legs_ok_until:
             pool = [p for p in pool if not p.get('needs_legs')]
@@ -218,10 +241,12 @@ class WebGame(HoleInWallGame):
 
     def new_wall(self, now):
         pool = self._pool(now)
-        if not self._order:
+        if not self._order or getattr(self, '_order_n', None) != len(pool):
             self._order = self._rng.permutation(len(pool)).tolist()
+            self._order_n = len(pool)
         idx = self._order.pop(0) % len(pool)
         if self.pose is not None and pool[idx] is self.pose and self._order:
+            self._order.append(idx)     # defer, don't drop, the colliding pose
             idx = self._order.pop(0) % len(pool)
         self.pose = pool[idx]
         self.deadline = now + self.round_time
@@ -261,6 +286,30 @@ class WebGame(HoleInWallGame):
                 2 * np.pi * (now - self.state_t0) / self.SLIDE_PERIOD)
         return float(dx)
 
+    def note_face_hands(self, face, hands):
+        self._face = face          # {'smile','open'} or None
+        self._hands = hands        # {'l','r'} gestures or None
+
+    def face_hand_scores(self):
+        # (face_score, hands_score) for the current pose's requirements,
+        # or None per slot when the pose does not require it
+        fs = hs = None
+        req_face = self.pose.get('face') if self.pose else None
+        req_hands = self.pose.get('hands') if self.pose else None
+        if req_face:
+            f = self._face or {'smile': 0.0, 'open': 0.0}
+            fs = f['smile'] if req_face == 'smile' else f['open']
+        if req_hands:
+            g = self._hands or {'l': 'none', 'r': 'none'}
+            shown = [side for side in ('l', 'r') if g[side] != 'none']
+            if not shown:
+                hs = 0.0
+            else:
+                hs = sum(1.0 for s in shown if g[s] == req_hands) / len(shown)
+                if len(shown) == 1:
+                    hs *= 0.75   # one hidden hand can't score full marks
+        return fs, hs
+
     def note_px(self, body):
         # track horizontal shoulder-center position, normalized -1..1
         if (body is not None and body.get('l_shoulder_vis', 0) > 0.3 and
@@ -274,17 +323,55 @@ class WebGame(HoleInWallGame):
         return float(np.clip((self._last_px - self.px0) * 260, -210, 210))
 
     def full_match(self, body, now):
-        # pose match blended with positional alignment for offset holes
-        match, seg_ok = match_pose_ex(body, self.pose)
-        if match is None:
+        # One weighted sum over every scored channel. Required channels whose
+        # landmarks are missing score 0 (not skipped) — otherwise a standing
+        # player with knees out of frame passes squat walls on arms alone, and
+        # nested averaging used to dilute leg weight below the pass bar.
+        arms, seg_ok = match_pose(body, self.pose['angles'])
+        if arms is None:
             return None, seg_ok
+        terms = [(arms, 4.0)]
+
+        if 'lean' in self.pose:
+            cur = torso_angle(body)
+            if cur is None:
+                lean_score = 0.0
+            else:
+                err = ang_diff(cur, self.pose['lean'])
+                lean_score = float(np.clip(
+                    1.0 - max(err - LEAN_TOLERANCE, 0.0) / 25.0, 0.0, 1.0))
+            seg_ok['lean'] = lean_score >= 0.6
+            terms.append((lean_score, 2.0))
+
+        if 'legs' in self.pose:
+            for a, b, key in (('l_hip', 'l_knee', 'lt'), ('r_hip', 'r_knee', 'rt')):
+                cur = seg_angle(body, a, b)
+                if cur is None:
+                    leg_score = 0.0
+                else:
+                    err = ang_diff(cur, self.pose['legs'][key])
+                    leg_score = float(np.clip(
+                        1.0 - max(err - 15.0, 0.0) / 30.0, 0.0, 1.0))
+                seg_ok[key] = leg_score >= 0.99
+                terms.append((leg_score, 3.0))
+
         if self.wall_dx or self.slide_amp:
             err = abs(self.avatar_x() - self.hole_dx(now))
             pos = float(np.clip(
                 1.0 - max(err - self.POS_FREE, 0.0) / self.POS_FALLOFF, 0.0, 1.0))
             seg_ok['pos'] = err < self.POS_FREE + 20
-            match = float((match * 4 + pos * 3) / 7)
-        return match, seg_ok
+            terms.append((pos, 3.0))
+
+        fs, hs = self.face_hand_scores()
+        if fs is not None:
+            seg_ok['face'] = fs >= 0.6
+            terms.append((fs, 2.0))
+        if hs is not None:
+            seg_ok['hands'] = hs >= 0.9
+            terms.append((hs, 2.0))
+
+        total_w = sum(w for _, w in terms)
+        return float(sum(s * w for s, w in terms) / total_w), seg_ok
 
     def target_payload(self):
         if self.pose is None:
@@ -296,11 +383,42 @@ class WebGame(HoleInWallGame):
             t['legs'] = self.pose['legs']
         return t
 
+    def compute_points(self, match, perfect):
+        bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
+        points = 100 * self.multiplier + (50 if perfect else 0) + bonus
+        if self.tight:
+            points *= 2
+        self.last_gain = {'points': points, 'perfect': perfect, 'bonus': bonus}
+        return points
+
+    def _on_pass(self, match, now):
+        outcome = super()._on_pass(match, now)
+        self.popups.clear()          # the browser draws its own popups
+        if self.two_p:
+            self._stash_player()
+        return outcome
+
+    def _on_crash(self, match, now):
+        outcome = super()._on_crash(match, now)
+        if self.two_p:
+            self._stash_player()
+        return outcome
+
+    def _advance_after_result(self, now):
+        if self.two_p:
+            return self._advance_two_p(now)
+        return super()._advance_after_result(now)
+
     def update(self, match, now):
         dt = min(now - self._last_t, 0.2)
         self._last_t = now
 
         if self.state == 'MENU':
+            return None
+
+        if self.state == 'HANDOFF':
+            if now - self.state_t0 >= self.HANDOFF_SECS:
+                self.new_wall(now)
             return None
 
         if self.state == 'WALL':
@@ -312,62 +430,10 @@ class WebGame(HoleInWallGame):
                 self._recent = []
                 self._hold = 0.0
                 return 'fakeout'
-            if match is not None:
-                self._recent.append((now, match))
-                if match >= self.pass_threshold:
-                    self._hold += dt   # reward locking the pose early
-            self._recent = [(t, m) for t, m in self._recent
-                            if now - t <= GRACE_WINDOW]
-            if self.time_left(now) > 0:
-                return None
-            if self._recent:
-                match = max(m for _, m in self._recent)
             if match is not None and match >= self.pass_threshold:
-                self.walls_passed += 1
-                self.streak += 1
-                perfect = match >= PERFECT_MATCH
-                bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
-                points = 100 * self.multiplier + (50 if perfect else 0) + bonus
-                if self.tight:
-                    points *= 2
-                self.score += points
-                self.round_time = max(ROUND_TIME_MIN,
-                                      self.round_time - ROUND_TIME_STEP)
-                self.result = ('pass', match)
-                self.last_gain = {'points': points, 'perfect': perfect,
-                                  'bonus': bonus}
-                if self.two_p:
-                    self._stash_player()
-                outcome = 'perfect' if perfect else 'pass'
-            else:
-                self.lives -= 1
-                self.streak = 0
-                self.result = ('crash', match or 0.0)
-                if self.two_p:
-                    self._stash_player()
-                outcome = 'crash'
-            self.state = 'RESULT'
-            self.state_t0 = now
-            return outcome
+                self._hold += dt   # reward locking the pose early
 
-        if self.state == 'RESULT':
-            if now - self.state_t0 >= RESULT_SECS:
-                if self.two_p:
-                    return self._advance_two_p(now)
-                if self.lives <= 0:
-                    self._finish_game(now)
-                else:
-                    self.new_wall(now)
-            return None
-
-        if self.state == 'HANDOFF':
-            if now - self.state_t0 >= self.HANDOFF_SECS:
-                self.new_wall(now)
-            return None
-
-        if self.state == 'COUNTDOWN':
-            return super().update(match, now)
-        return None
+        return super().update(match, now)
 
     def _advance_two_p(self, now):
         self._stash_player()
@@ -386,20 +452,33 @@ class WebGame(HoleInWallGame):
         self.state = 'GAME_OVER'
         self.state_t0 = now
         self.new_record = False
+        self.record_score(max(s0, s1))
         return None
 
+    def record_score(self, score):
+        # persist any run's score (2P winners, abandoned runs) against the
+        # high score / daily best without changing the game-over display
+        changed = False
+        if score > self.high_score:
+            self.high_score = score
+            changed = True
+        if self.mode == 'daily' and self.daily_date:
+            prev = self.daily_scores.get(self.daily_date, 0)
+            if score > prev:
+                self.daily_scores[self.daily_date] = score
+                changed = True
+        if changed:
+            self._save_high_score()
+
     def _finish_game(self, now):
-        self.state = 'GAME_OVER'
-        self.state_t0 = now
-        self.new_record = self.score > self.high_score
-        if self.new_record:
-            self.high_score = self.score
-        if self.mode == 'daily':
+        if self.mode == 'daily' and self.daily_date:
             prev = self.daily_scores.get(self.daily_date, 0)
             self.daily_scores[self.daily_date] = max(prev, self.score)
-        self._save_high_score()
+        super()._finish_game(now)
+
 
 LOCK = threading.Lock()
+CLIENTS = set()        # connected websockets (shared with the capture thread)
 LATEST = None          # most recent payload dict (with accumulated events)
 FLAGS = set()          # input flags from the browser: 'restart', 'skip'
 RUNNING = True
@@ -422,7 +501,7 @@ def capture_loop():
     and lets this loop reopen the device.
     """
     global RUNNING
-    pose_det = PoseDetector(confidence=0.5, model_complexity=1)
+    pose_det = TasksDetector(confidence=0.5, model_complexity=1)
     game = WebGame(time.time())
     game.sounds.paths = {}          # browser plays the sounds instead
 
@@ -479,9 +558,13 @@ def _capture_session(pose_det, game):
             if not ret:
                 break
             last_frame[0] = time.time()
-            cam = cv2.resize(cv2.flip(cam, 1), (FRAME_W, FRAME_H))
             now = time.time()
             frame_i += 1
+            if not CLIENTS:
+                # keep frames flowing for the watchdog, skip all inference
+                time.sleep(0.05)
+                continue
+            cam = cv2.resize(cv2.flip(cam, 1), (FRAME_W, FRAME_H))
 
             results = pose_det.detect(cam)
             body = pose_det.get_body(results, FRAME_W, FRAME_H, mirrored=True)
@@ -492,6 +575,9 @@ def _capture_session(pose_det, game):
                     body[name] = filters[name].apply(body[name])
                 game.note_legs(body, now)
                 game.note_px(body)
+                game.note_face_hands(
+                    pose_det.face_metrics(results, FRAME_W, FRAME_H, mirrored=True),
+                    pose_det.hand_gestures(results, FRAME_W, FRAME_H, mirrored=True))
                 if game.pose is not None and game.state == 'WALL':
                     match, seg_ok = game.full_match(body, now)
             else:
@@ -509,8 +595,10 @@ def _capture_session(pose_det, game):
                     game.start(now, game.mode)
             if 'daily' in flags and game.state in ('MENU', 'GAME_OVER'):
                 game.start(now, 'daily')
-            if 'menu' in flags and game.state == 'GAME_OVER':
+            if 'menu' in flags and game.state != 'MENU':
+                game.record_score(game.score)   # ESC must not eat a record run
                 game.state = 'MENU'
+                game.pose = None
             if 'toggle2p' in flags and game.state == 'MENU':
                 game.two_p = not game.two_p
             if 'togglelegs' in flags and game.state == 'MENU':
@@ -528,7 +616,9 @@ def _capture_session(pose_det, game):
             if game.state == 'GAME_OVER' and prev_state != 'GAME_OVER':
                 events.append('gameover')
 
-            # small camera preview at ~half the frame rate
+            # small camera preview at ~half the frame rate; sent only on
+            # frames where it was actually re-encoded (client keeps the last)
+            pip_b64 = None
             if frame_i % 2 == 0:
                 small = cv2.resize(pose_det.draw(cam, results), (480, 270))
                 ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 72])
@@ -536,6 +626,7 @@ def _capture_session(pose_det, game):
                     pip_b64 = base64.b64encode(buf).decode('ascii')
 
             data = {
+                'seq': frame_i,
                 'state': game.state,
                 'pose': payload_pose(pose_from_body(body)),
                 'targetAngles': game.target_payload(),
@@ -569,6 +660,10 @@ def _capture_session(pose_det, game):
                              for p in game.players]
                             if game.two_p and len(game.players) == 2 else None),
                 'winner': game.winner,
+                'faceReq': game.pose.get('face') if game.pose else None,
+                'handsReq': game.pose.get('hands') if game.pose else None,
+                'faceLive': game._face,
+                'handShapes': pose_det.hand_shapes(mirrored=True),
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,
@@ -592,18 +687,20 @@ async def ws_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     request.app['clients'].add(ws)
+    CLIENTS.add(ws)
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 try:
                     key = json.loads(msg.data).get('key')
-                except ValueError:
+                except (ValueError, AttributeError, TypeError):
                     continue
                 if key in ('restart', 'skip', 'daily', 'menu', 'toggle2p', 'togglelegs'):
                     with LOCK:
                         FLAGS.add(key)
     finally:
         request.app['clients'].discard(ws)
+        CLIENTS.discard(ws)
     return ws
 
 
@@ -613,15 +710,19 @@ async def index(_request):
 
 async def broadcaster(app):
     global LATEST
+    last_seq = None
     try:
         while True:
             await asyncio.sleep(1 / 30)
             with LOCK:
                 data = LATEST
-                if data is not None:
+                if data is not None and app['clients']:
                     LATEST = dict(data, events=[])   # events delivered once
             if data is None or not app['clients']:
                 continue
+            if data.get('seq') == last_seq and not data.get('events'):
+                continue                             # nothing new to send
+            last_seq = data.get('seq')
             text = json.dumps(data)
             for ws in list(app['clients']):
                 try:
@@ -660,3 +761,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+WebGame.DAILY_POOL = DAILY_POOL
