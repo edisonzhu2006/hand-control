@@ -906,6 +906,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 't') sendKey('toggle2p');
   if (e.key === 'l') sendKey('togglelegs');
   if (e.key === 'm') { audioOn = !audioOn; if (!audioOn) speechSynthesis?.cancel(); }
+  if (e.key === 'h' && use3d) T3.nextLook();
   if (e.key === 'c' && S && S.state === 'GAME_OVER') downloadScoreCard();
 });
 

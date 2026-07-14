@@ -19,8 +19,25 @@ const T3 = (() => {
   const handSprites = {};    // side -> {sprite, canvas, tex}
   const limbs = {};
   const joints = {};
-  let group, headMesh;
+  let group, headMesh, hairMesh;
   let ok = false;
+
+  // outfit shop (H to cycle): shirt / shorts / hair colors
+  const LOOKS = [
+    { shirt: 0xd73434, shorts: 0x2a3a5c, hair: 0x3a2a1e },   // classic red
+    { shirt: 0x2e8f5b, shorts: 0x23232b, hair: 0x111111 },   // forest
+    { shirt: 0x8458c9, shorts: 0x3a2a1e, hair: 0xd6b03c },   // wizard blond
+    { shirt: 0xf0ede4, shorts: 0xd73434, hair: 0x777777 },   // classic ivory
+  ];
+  let lookIdx = 0;
+  function setLook(i) {
+    lookIdx = ((i % LOOKS.length) + LOOKS.length) % LOOKS.length;
+    const L = LOOKS[lookIdx];
+    for (const key of ['tor', 'shB']) limbs[key].material.color.setHex(L.shirt);
+    for (const key of ['luA', 'ruA']) limbs[key].material.color.setHex(L.shirt);
+    for (const key of ['hpB', 'ltL', 'rtL']) limbs[key].material.color.setHex(L.shorts);
+    if (hairMesh) hairMesh.material.color.setHex(L.hair);
+  }
 
   const LIMB_DEFS = [
     ['luA', 'l_shoulder', 'l_elbow', 0.05], ['lfA', 'l_elbow', 'l_wrist', 0.045],
@@ -101,6 +118,12 @@ const T3 = (() => {
 
       headMesh = outlined(new THREE.SphereGeometry(0.17, 24, 18), IVORY, 1.14);
       group.add(headMesh);
+      // hair cap: the head's orientation landmark (rotates with the head)
+      hairMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.178, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
+        toonMat(0x3a2a1e));
+      hairMesh.rotation.x = -0.35;
+      headMesh.add(hairMesh);
 
       // face: camera-facing billboard drawn with the designed 2D face
       faceCanvas = document.createElement('canvas');
@@ -132,6 +155,7 @@ const T3 = (() => {
       wallMesh.visible = false;
       scene.add(wallMesh);
 
+      setLook(0);   // dress him: clothing makes 3D rotation readable
       ok = true;
     } catch (e) {
       ok = false;
@@ -285,6 +309,7 @@ const T3 = (() => {
       const nose = rel('nose') || [0, -0.25, -0.05];
       const hp = V([nose[0] * 0.55, nose[1] * 0.8 - 0.07, nose[2] * 0.6]);
       headMesh.position.copy(hp);
+      headMesh.rotation.set(-nose[1] * 0.8, -nose[0] * 1.6, 0);
       faceSprite.position.set(hp.x, hp.y, hp.z + 0.17);
       drawFace(live, gameFace);
 
@@ -324,7 +349,8 @@ const T3 = (() => {
   }
 
   return {
-    init, update, setWallTexture,
+    init, update, setWallTexture, setLook,
+    nextLook: () => setLook(lookIdx + 1),
     drawFaceTexture: () => {},   // folded into update()
     get ok() { return ok; },
     get canvas() { return renderer ? renderer.domElement : null; },
