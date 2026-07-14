@@ -566,8 +566,9 @@ def _capture_session(pose_det, game):
                     game.start(now, game.mode)
             if 'daily' in flags and game.state in ('MENU', 'GAME_OVER'):
                 game.start(now, 'daily')
-            if 'menu' in flags and game.state == 'GAME_OVER':
-                game.state = 'MENU'
+            if 'menu' in flags and game.state != 'MENU':
+                game.state = 'MENU'    # abandon run, back to title
+                game.pose = None
             if 'toggle2p' in flags and game.state == 'MENU':
                 game.two_p = not game.two_p
             if 'togglelegs' in flags and game.state == 'MENU':

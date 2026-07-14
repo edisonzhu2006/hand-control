@@ -743,6 +743,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { sendKey('restart'); e.preventDefault(); }
   if (e.key === 's') sendKey('skip');
   if (e.key === 'd') sendKey('daily');
+  if (e.key === 'Escape') sendKey('menu');
   if (e.key === 't') sendKey('toggle2p');
   if (e.key === 'l') sendKey('togglelegs');
   if (e.key === 'm') { audioOn = !audioOn; if (!audioOn) speechSynthesis?.cancel(); }
