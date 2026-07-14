@@ -11,7 +11,7 @@ const T3 = (() => {
   if (typeof THREE === 'undefined') return null;
 
   const PXPM = 195;          // wall-texture pixels per meter
-  const SHOULDER_Y = 1.24;   // avatar shoulder height above the floor (m)
+  const SHOULDER_Y = 1.16;   // avatar shoulder height above the floor (m)
   const IVORY = 0xf0ede4, DARK = 0x23232b;
 
   let renderer, scene, camera, wallMesh, wallTex;
@@ -33,7 +33,8 @@ const T3 = (() => {
   ];
 
   function toonMat(color) {
-    return new THREE.MeshToonMaterial({ color });
+    // lit material: depth reads through shading gradients as limbs rotate
+    return new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
   }
 
   function outlined(geo, color, hull = 1.22) {
@@ -60,7 +61,7 @@ const T3 = (() => {
       camera.position.set(0, 1.35, 3.9);
       camera.lookAt(0, 1.0, 0);
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
       const key = new THREE.SpotLight(0xf5e9d0, 700, 30, 0.55, 0.6);
       key.position.set(0, 6.5, 3.5);
       key.castShadow = true;
@@ -106,7 +107,7 @@ const T3 = (() => {
       faceCanvas.width = faceCanvas.height = 256;
       faceTex = new THREE.CanvasTexture(faceCanvas);
       faceSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: faceTex, transparent: true, depthTest: false }));
+        map: faceTex, transparent: true }));
       faceSprite.scale.set(0.42, 0.42, 1);
       group.add(faceSprite);
 
@@ -116,7 +117,7 @@ const T3 = (() => {
         cv.width = cv.height = 128;
         const tex = new THREE.CanvasTexture(cv);
         const sp = new THREE.Sprite(new THREE.SpriteMaterial({
-          map: tex, transparent: true, depthTest: false }));
+          map: tex, transparent: true }));
         sp.scale.set(0.36, 0.36, 1);
         handSprites[side] = { sprite: sp, canvas: cv, tex };
         group.add(sp);
@@ -248,8 +249,14 @@ const T3 = (() => {
     wallMesh.material.needsUpdate = true;
   }
 
+  let orbitT = 0;
+
   function update(S, live, ax, depthScale, gameFace) {
     if (!ok) return;
+    orbitT += 0.016;
+    const a = Math.sin(orbitT * 0.35) * 0.30;   // gentle sway around the stage
+    camera.position.set(Math.sin(a) * 3.9, 1.35, Math.cos(a) * 3.9);
+    camera.lookAt(0, 1.0, 0);
     const P = live && live.p3;
     group.visible = !!(P && P.l_shoulder && P.r_shoulder);
     if (group.visible) {
@@ -302,7 +309,7 @@ const T3 = (() => {
       wallMesh.visible = true;
       const z = S.state === 'WALL'
         ? -16 * (1 - Math.pow(S.progress, 2.2))
-        : 2.6 * Math.pow(S.resultT, 1.4);
+        : 6.0 * Math.pow(S.resultT, 1.4);
       // texture row HOLE_CY (280px) must sit at avatar chest height
       const chestY = SHOULDER_Y - 0.35;
       const planeCenterY = chestY + (280 - 760 / 2) / PXPM * -1;

@@ -600,8 +600,6 @@ def _capture_session(pose_det, game):
                           if body.get(k + '_vis', 0) > 0.3}
 
             match, seg_ok = None, {}
-            if body3d is None:
-                body3d = None
             if body is not None:
                 for name in PoseDetector.BODY:
                     body[name] = filters[name].apply(body[name])

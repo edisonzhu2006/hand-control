@@ -986,9 +986,11 @@ app.ticker.add((dt) => {
   axSmooth += ((S.ax || 0) - axSmooth) * Math.min(1, dts * 12);
   holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
-  drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
-    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
-    { face: S.faceLive, shapes: S.handShapes, p3: S.pose3d });
+  if (!use3d) {
+    drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
+      { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
+      { face: S.faceLive, shapes: S.handShapes, p3: S.pose3d });
+  }
 
   // 3D scene drives its own avatar + wall
   if (use3d) {
