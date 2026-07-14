@@ -996,8 +996,8 @@ app.ticker.add((dt) => {
       T3.setWallTexture(buildWallTexture(S.targetAngles));
       wallForPose = S.poseName;
     }
-    T3.drawFaceTexture(S.faceLive, { face: S.faceLive });
-    T3.update(S, { p3: S.pose3d, face: S.faceLive }, axSmooth, depthScale);
+    T3.update(S, { p3: S.pose3d, face: S.faceLive, shapes: S.handShapes },
+      axSmooth, depthScale, face);
   }
 
   // wall (sprite shifts horizontally for offset / sliding holes)

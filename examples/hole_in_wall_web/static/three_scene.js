@@ -1,37 +1,51 @@
-/* True-3D scene: floor, lights, approaching wall, and a capsule-limb stickman
- * driven by the player's 3D world landmarks. Renders on its own WebGL canvas
- * under the (transparent) Pixi HUD. Falls back cleanly: if init fails, the
- * classic 2.5D Pixi renderer keeps running.
+/* True-3D scene in the designed art style: cel-shaded ivory stickman with
+ * dark inverted-hull outlines, camera-facing face billboard (same eyes +
+ * volumetric lips as the 2D renderer), hand-skeleton billboards at the
+ * wrists, and the wall as an alpha-cut plane approaching in real z.
  *
- * Coordinate mapping: pose3d is meters, shoulder-anchored, x right / y DOWN /
- * z away from camera. Three is y UP, camera looks down -z. We negate y and z:
- * player-toward-camera (data z<0) becomes three z>0 (toward the viewer).
+ * pose3d: meters, shoulder-anchored, x right / y DOWN / z away from camera.
+ * Three is y-up, camera looks down -z: we negate y and z.
  */
 
 const T3 = (() => {
   if (typeof THREE === 'undefined') return null;
 
-  const PXPM = 195;          // texture pixels per meter (matches avatar scale)
-  const SHOULDER_Y = 0.62;   // avatar shoulder height above the floor (m)
-
-  let renderer, scene, camera, wallMesh, wallTex, wallCanvas;
-  let faceCanvas, faceTex, headMesh;
-  const limbs = {};          // name -> {mesh, from, to, radius}
-  const joints = {};         // name -> sphere mesh
-  let group;                 // whole avatar
-  let ok = false;
-
+  const PXPM = 195;          // wall-texture pixels per meter
+  const SHOULDER_Y = 1.24;   // avatar shoulder height above the floor (m)
   const IVORY = 0xf0ede4, DARK = 0x23232b;
 
+  let renderer, scene, camera, wallMesh, wallTex;
+  let faceSprite, faceCanvas, faceTex;
+  const handSprites = {};    // side -> {sprite, canvas, tex}
+  const limbs = {};
+  const joints = {};
+  let group, headMesh;
+  let ok = false;
+
   const LIMB_DEFS = [
-    ['luA', 'l_shoulder', 'l_elbow', 0.045], ['lfA', 'l_elbow', 'l_wrist', 0.04],
-    ['ruA', 'r_shoulder', 'r_elbow', 0.045], ['rfA', 'r_elbow', 'r_wrist', 0.04],
-    ['ltL', 'l_hip', 'l_knee', 0.055], ['lsL', 'l_knee', 'l_ankle', 0.05],
-    ['rtL', 'r_hip', 'r_knee', 0.055], ['rsL', 'r_knee', 'r_ankle', 0.05],
-    ['shB', 'l_shoulder', 'r_shoulder', 0.05],
-    ['hpB', 'l_hip', 'r_hip', 0.05],
-    ['tor', 'shc', 'hipc', 0.085],
+    ['luA', 'l_shoulder', 'l_elbow', 0.05], ['lfA', 'l_elbow', 'l_wrist', 0.045],
+    ['ruA', 'r_shoulder', 'r_elbow', 0.05], ['rfA', 'r_elbow', 'r_wrist', 0.045],
+    ['ltL', 'l_hip', 'l_knee', 0.06], ['lsL', 'l_knee', 'l_ankle', 0.055],
+    ['rtL', 'r_hip', 'r_knee', 0.06], ['rsL', 'r_knee', 'r_ankle', 0.055],
+    ['shB', 'l_shoulder', 'r_shoulder', 0.055],
+    ['hpB', 'l_hip', 'r_hip', 0.055],
+    ['tor', 'shc', 'hipc', 0.095],
   ];
+
+  function toonMat(color) {
+    return new THREE.MeshToonMaterial({ color });
+  }
+
+  function outlined(geo, color, hull = 1.22) {
+    // designed look: flat fill + dark outline (inverted hull)
+    const m = new THREE.Mesh(geo, toonMat(color));
+    m.castShadow = true;
+    const o = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: DARK, side: THREE.BackSide }));
+    o.scale.set(hull, 1.02, hull);
+    m.add(o);
+    return m;
+  }
 
   function init(width, height) {
     try {
@@ -41,17 +55,17 @@ const T3 = (() => {
       renderer.shadowMap.enabled = true;
 
       scene = new THREE.Scene();
-      scene.fog = new THREE.Fog(0x121218, 8, 22);
+      scene.fog = new THREE.Fog(0x121218, 9, 24);
       camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 60);
-      camera.position.set(0, 1.15, 3.6);
-      camera.lookAt(0, 0.65, 0);
+      camera.position.set(0, 1.35, 3.9);
+      camera.lookAt(0, 1.0, 0);
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-      const key = new THREE.SpotLight(0xf5e9d0, 900, 30, 0.5, 0.5);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+      const key = new THREE.SpotLight(0xf5e9d0, 700, 30, 0.55, 0.6);
       key.position.set(0, 6.5, 3.5);
       key.castShadow = true;
       scene.add(key);
-      const rim = new THREE.DirectionalLight(0x7ad6ff, 0.7);
+      const rim = new THREE.DirectionalLight(0x7ad6ff, 0.5);
       rim.position.set(-3, 3, -4);
       scene.add(rim);
 
@@ -64,63 +78,50 @@ const T3 = (() => {
       const grid = new THREE.GridHelper(24, 24, 0x39424e, 0x272d36);
       grid.position.y = 0.002;
       scene.add(grid);
-      const pool = new THREE.Mesh(
-        new THREE.CircleGeometry(1.4, 40),
-        new THREE.MeshBasicMaterial({ color: 0x3a3428, transparent: true, opacity: 0.5 }));
-      pool.rotation.x = -Math.PI / 2;
-      pool.position.y = 0.004;
-      scene.add(pool);
 
-      // avatar rig
       group = new THREE.Group();
       scene.add(group);
-      const mat = new THREE.MeshStandardMaterial({ color: IVORY, roughness: 0.6 });
-      const darkMat = new THREE.MeshStandardMaterial({ color: DARK, roughness: 0.7 });
       for (const [key2, , , rad] of LIMB_DEFS) {
-        const m = new THREE.Mesh(
-          new THREE.CapsuleGeometry(rad, 1, 4, 10),
-          key2 === 'tor' ? mat : mat);
-        m.castShadow = true;
+        const m = outlined(new THREE.CapsuleGeometry(rad, 1, 4, 10), IVORY, 1.3);
         limbs[key2] = m;
         group.add(m);
       }
       for (const name of ['l_shoulder', 'r_shoulder', 'l_elbow', 'r_elbow',
         'l_hip', 'r_hip', 'l_knee', 'r_knee']) {
-        const s = new THREE.Mesh(new THREE.SphereGeometry(0.05, 12, 10), mat);
-        s.castShadow = true;
+        const s = outlined(new THREE.SphereGeometry(0.055, 12, 10), IVORY);
         joints[name] = s;
         group.add(s);
       }
-      for (const name of ['l_wrist', 'r_wrist']) {
-        const s = new THREE.Mesh(new THREE.SphereGeometry(0.055, 12, 10), darkMat);
-        s.castShadow = true;
-        joints[name] = s;
-        group.add(s);
-      }
-      for (const name of ['l_ankle', 'r_ankle']) {
-        const s = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 10), darkMat);
-        s.castShadow = true;
+      for (const name of ['l_wrist', 'r_wrist', 'l_ankle', 'r_ankle']) {
+        const s = outlined(new THREE.SphereGeometry(0.06, 12, 10), DARK, 1.0);
         joints[name] = s;
         group.add(s);
       }
 
-      // head with a live canvas face
+      headMesh = outlined(new THREE.SphereGeometry(0.17, 24, 18), IVORY, 1.14);
+      group.add(headMesh);
+
+      // face: camera-facing billboard drawn with the designed 2D face
       faceCanvas = document.createElement('canvas');
       faceCanvas.width = faceCanvas.height = 256;
       faceTex = new THREE.CanvasTexture(faceCanvas);
-      headMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.16, 24, 18),
-        [
-          new THREE.MeshStandardMaterial({ color: IVORY, roughness: 0.6 }),
-        ][0]);
-      headMesh.material = new THREE.MeshStandardMaterial({
-        color: 0xffffff, roughness: 0.6, map: faceTex });
-      headMesh.castShadow = true;
-      group.add(headMesh);
+      faceSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: faceTex, transparent: true, depthTest: false }));
+      faceSprite.scale.set(0.42, 0.42, 1);
+      group.add(faceSprite);
 
-      // wall plane (texture swapped per wall)
-      wallCanvas = null;
-      wallTex = null;
+      // hand-skeleton billboards
+      for (const side of ['l', 'r']) {
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = 128;
+        const tex = new THREE.CanvasTexture(cv);
+        const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: tex, transparent: true, depthTest: false }));
+        sp.scale.set(0.36, 0.36, 1);
+        handSprites[side] = { sprite: sp, canvas: cv, tex };
+        group.add(sp);
+      }
+
       wallMesh = new THREE.Mesh(
         new THREE.PlaneGeometry(960 / PXPM, 760 / PXPM),
         new THREE.MeshStandardMaterial({
@@ -144,66 +145,102 @@ const T3 = (() => {
     if (!a || !b) { m.visible = false; return; }
     m.visible = true;
     const va = V(a), vb = V(b);
-    const mid = va.clone().add(vb).multiplyScalar(0.5);
-    const len = Math.max(0.05, va.distanceTo(vb));
-    m.position.copy(mid);
-    m.scale.set(1, len, 1);
+    m.position.copy(va.clone().add(vb).multiplyScalar(0.5));
+    m.scale.set(1, Math.max(0.05, va.distanceTo(vb)), 1);
     m.quaternion.setFromUnitVectors(
       new THREE.Vector3(0, 1, 0), vb.clone().sub(va).normalize());
   }
 
-  function drawFaceTexture(face, live) {
+  function drawFace(live, gameFace) {
     const ctx = faceCanvas.getContext('2d');
-    ctx.fillStyle = '#f0ede4';
-    ctx.fillRect(0, 0, 256, 256);
-    // face lives on the +z hemisphere; sphere UV front center ~ (0.5, 0.55)
-    const cx = 128, cy = 132, r = 52;
-    const blinkL = live && live.face ? live.face.blinkL : 0;
-    const blinkR = live && live.face ? live.face.blinkR : 0;
+    ctx.clearRect(0, 0, 256, 256);
+    const cx = 128, cy = 118, r = 88;
+    const f = live && live.face ? live.face : null;
     ctx.fillStyle = '#23232b';
     ctx.strokeStyle = '#23232b';
-    ctx.lineWidth = 5;
-    for (const [bl, sx] of [[blinkL, -1], [blinkR, 1]]) {
-      const ex = cx + sx * r * 0.55, ey = cy - r * 0.35;
-      if (bl > 0.5) {
-        ctx.beginPath(); ctx.moveTo(ex - 10, ey); ctx.lineTo(ex + 10, ey); ctx.stroke();
+    ctx.lineWidth = 7;
+
+    // eyes (X-eyes on crash, happy arcs on pass, live blinks otherwise)
+    for (const [i, sx] of [[0, -1], [1, 1]]) {
+      const ex = cx + sx * r * 0.34, ey = cy - r * 0.18;
+      if (gameFace === 'hit') {
+        ctx.beginPath();
+        ctx.moveTo(ex - 12, ey - 12); ctx.lineTo(ex + 12, ey + 12);
+        ctx.moveTo(ex - 12, ey + 12); ctx.lineTo(ex + 12, ey - 12);
+        ctx.stroke();
+      } else if (gameFace === 'win') {
+        ctx.beginPath(); ctx.arc(ex, ey + 5, 12, 1.15 * Math.PI, 1.85 * Math.PI);
+        ctx.stroke();
       } else {
-        ctx.beginPath(); ctx.arc(ex, ey, 8, 0, 7); ctx.fill();
+        const bl = f ? (i === 0 ? f.blinkL : f.blinkR) : 0;
+        if (bl > 0.5) {
+          ctx.beginPath(); ctx.moveTo(ex - 12, ey); ctx.lineTo(ex + 12, ey); ctx.stroke();
+        } else {
+          ctx.beginPath(); ctx.arc(ex, ey, 9, 0, 7); ctx.fill();
+        }
       }
     }
-    const mouth = live && live.face ? live.face.mouth : null;
-    if (mouth && mouth.o) {
-      const ms = r * 2.6;
-      const my = cy + r * 0.55;
-      ctx.fillStyle = '#c9847a';
-      ctx.strokeStyle = '#8a4a42';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      mouth.o.forEach((pt, i) => {
-        const x = cx + pt[0] * ms, y = my + pt[1] * ms;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      });
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      const openAmt = live.face.open || 0;
-      if (openAmt > 0.12) {
-        ctx.fillStyle = `rgba(42,17,20,${Math.min(1, (openAmt - 0.12) / 0.15)})`;
+
+    // volumetric mouth: same treatment as the designed 2D face
+    const my = cy + r * 0.35;
+    if (f && f.mouth && f.mouth.o) {
+      const ms = r * 2.1;
+      const path = (ring) => {
         ctx.beginPath();
-        mouth.i.forEach((pt, i) => {
+        ring.forEach((pt, i) => {
           const x = cx + pt[0] * ms, y = my + pt[1] * ms;
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         });
-        ctx.closePath(); ctx.fill();
+        ctx.closePath();
+      };
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.14)';
+      ctx.translate(0, 5); path(f.mouth.o); ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = '#c9847a'; ctx.strokeStyle = '#8a4a42'; ctx.lineWidth = 4;
+      path(f.mouth.o); ctx.fill(); ctx.stroke();
+      const openAmt = f.open || 0;
+      if (openAmt > 0.12) {
+        ctx.fillStyle = `rgba(42,17,20,${Math.min(1, (openAmt - 0.12) / 0.15)})`;
+        path(f.mouth.i); ctx.fill();
+      } else {
+        ctx.strokeStyle = 'rgba(122,64,56,0.9)'; ctx.lineWidth = 3;
+        path(f.mouth.i); ctx.stroke();
       }
     } else {
       ctx.beginPath();
-      ctx.arc(cx, cy + r * 0.5, 14, 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.arc(cx, my, 20, 0.15 * Math.PI, 0.85 * Math.PI);
       ctx.stroke();
     }
     faceTex.needsUpdate = true;
   }
 
+  const HAND_BONES = [
+    [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
+  ];
+
+  function drawHand(side, shape) {
+    const { canvas, tex, sprite } = handSprites[side];
+    if (!shape) { sprite.visible = false; return; }
+    sprite.visible = true;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, 128, 128);
+    ctx.strokeStyle = '#23232b';
+    ctx.lineWidth = 9;
+    ctx.lineCap = 'round';
+    const s = 26;
+    for (const [a, b] of HAND_BONES) {
+      ctx.beginPath();
+      ctx.moveTo(64 + shape[a][0] * s, 64 + shape[a][1] * s);
+      ctx.lineTo(64 + shape[b][0] * s, 64 + shape[b][1] * s);
+      ctx.stroke();
+    }
+    tex.needsUpdate = true;
+  }
+
   function setWallTexture(canvas) {
-    wallCanvas = canvas;
     if (wallTex) wallTex.dispose();
     wallTex = new THREE.CanvasTexture(canvas);
     wallTex.colorSpace = THREE.SRGBColorSpace;
@@ -211,20 +248,18 @@ const T3 = (() => {
     wallMesh.material.needsUpdate = true;
   }
 
-  function update(S, live, ax, depthScale) {
+  function update(S, live, ax, depthScale, gameFace) {
     if (!ok) return;
     const P = live && live.p3;
-    group.visible = !!P;
-    if (P && P.l_shoulder && P.r_shoulder) {
+    group.visible = !!(P && P.l_shoulder && P.r_shoulder);
+    if (group.visible) {
       const shc = [(P.l_shoulder[0] + P.r_shoulder[0]) / 2,
                    (P.l_shoulder[1] + P.r_shoulder[1]) / 2,
                    (P.l_shoulder[2] + P.r_shoulder[2]) / 2];
-      const rel = (name) => P[name]
-        ? [P[name][0] - shc[0], P[name][1] - shc[1], P[name][2] - shc[2]]
-        : null;
+      const rel = (n) => P[n]
+        ? [P[n][0] - shc[0], P[n][1] - shc[1], P[n][2] - shc[2]] : null;
       const J = {};
-      for (const name of Object.keys(joints)) J[name] = rel(name);
-      // default legs when untracked: straight down from hips
+      for (const n of Object.keys(joints)) J[n] = rel(n);
       if (!J.l_hip) J.l_hip = [-0.09, 0.45, 0];
       if (!J.r_hip) J.r_hip = [0.09, 0.45, 0];
       if (!J.l_knee) J.l_knee = [J.l_hip[0] - 0.02, J.l_hip[1] + 0.4, 0];
@@ -235,33 +270,43 @@ const T3 = (() => {
       J.hipc = [(J.l_hip[0] + J.r_hip[0]) / 2, (J.l_hip[1] + J.r_hip[1]) / 2,
                 (J.l_hip[2] + J.r_hip[2]) / 2];
 
-      for (const [key, aN, bN] of LIMB_DEFS.map(d => [d[0], d[1], d[2]])) {
-        setLimb(key, J[aN], J[bN]);
-      }
-      for (const name of Object.keys(joints)) {
-        if (J[name]) { joints[name].visible = true; joints[name].position.copy(V(J[name])); }
-        else joints[name].visible = false;
+      for (const [key, aN, bN] of LIMB_DEFS) setLimb(key, J[aN], J[bN]);
+      for (const n of Object.keys(joints)) {
+        joints[n].visible = !!J[n];
+        if (J[n]) joints[n].position.copy(V(J[n]));
       }
       const nose = rel('nose') || [0, -0.25, -0.05];
-      headMesh.position.copy(V([nose[0] * 0.55, nose[1] * 0.8 - 0.06, nose[2] * 0.6]));
-      // face the camera-ish, tilting with the nose offset
-      headMesh.rotation.set(-nose[1] * 0.6, nose[0] * 1.2, 0);
+      const hp = V([nose[0] * 0.55, nose[1] * 0.8 - 0.07, nose[2] * 0.6]);
+      headMesh.position.copy(hp);
+      faceSprite.position.set(hp.x, hp.y, hp.z + 0.17);
+      drawFace(live, gameFace);
 
-      group.position.set(ax / PXPM, SHOULDER_Y + 0.62, 0);
+      for (const [side, wr] of [['l', 'l_wrist'], ['r', 'r_wrist']]) {
+        const sp = handSprites[side].sprite;
+        drawHand(side, live && live.shapes ? live.shapes[side] : null);
+        if (J[wr] && sp.visible) {
+          const wp = V(J[wr]);
+          sp.position.set(wp.x, wp.y, wp.z + 0.12);
+        } else {
+          sp.visible = false;
+        }
+      }
+
+      group.position.set(ax / PXPM, SHOULDER_Y, 0);
       const ds = depthScale || 1;
       group.scale.set(ds, ds, ds);
     }
 
-    // wall approach in real z
-    if (S.state === 'WALL' || (S.state === 'RESULT' && S.outcome === 'pass')) {
-      wallMesh.visible = !!wallTex;
-      let zt;
-      if (S.state === 'WALL') {
-        zt = -16 * (1 - Math.pow(S.progress, 2.2));
-      } else {
-        zt = 2.5 * Math.pow(S.resultT, 1.4);   // flies past the camera
-      }
-      wallMesh.position.set((S.holeDx || 0) / PXPM, 760 / PXPM / 2 - (280 - 195) / PXPM - SHOULDER_Y + 1.05, zt);
+    if ((S.state === 'WALL' || (S.state === 'RESULT' && S.outcome === 'pass'))
+        && wallTex) {
+      wallMesh.visible = true;
+      const z = S.state === 'WALL'
+        ? -16 * (1 - Math.pow(S.progress, 2.2))
+        : 2.6 * Math.pow(S.resultT, 1.4);
+      // texture row HOLE_CY (280px) must sit at avatar chest height
+      const chestY = SHOULDER_Y - 0.35;
+      const planeCenterY = chestY + (280 - 760 / 2) / PXPM * -1;
+      wallMesh.position.set((S.holeDx || 0) / PXPM, planeCenterY, z);
       const dr = 1 + 0.18 * (S.depthReq || 0);
       wallMesh.scale.set(dr, dr, 1);
     } else {
@@ -272,7 +317,8 @@ const T3 = (() => {
   }
 
   return {
-    init, update, setWallTexture, drawFaceTexture,
+    init, update, setWallTexture,
+    drawFaceTexture: () => {},   // folded into update()
     get ok() { return ok; },
     get canvas() { return renderer ? renderer.domElement : null; },
   };
