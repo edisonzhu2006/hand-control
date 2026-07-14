@@ -82,10 +82,11 @@ class TasksDetector(PoseDetector):
             ))
 
         self._ts_ms = 0
-        self._face = {'smile': 0.0, 'open': 0.0}
+        self._face = {'smile': 0.0, 'open': 0.0, 'blinkL': 0.0, 'blinkR': 0.0}
         self._votes = {'Left': collections.deque(maxlen=GESTURE_VOTES),
                        'Right': collections.deque(maxlen=GESTURE_VOTES)}
         self._gestures = {'Left': 'none', 'Right': 'none'}
+        self._fingers = {'Left': None, 'Right': None}   # [thumb..pinky] bools
 
     def detect(self, frame):
         """Run pose + face + gestures; returns pose results (as before)."""
@@ -110,6 +111,11 @@ class TasksDetector(PoseDetector):
             self._face = {
                 'smile': float(a * smile + (1 - a) * self._face['smile']),
                 'open': float(a * open_ + (1 - a) * self._face['open']),
+                # blendshape sides are the image person's anatomy
+                'blinkL': float(a * shapes.get('eyeBlinkLeft', 0) +
+                                (1 - a) * self._face['blinkL']),
+                'blinkR': float(a * shapes.get('eyeBlinkRight', 0) +
+                                (1 - a) * self._face['blinkR']),
             }
         # keep last values briefly when the face drops out (EMA decays anyway)
 
@@ -117,28 +123,47 @@ class TasksDetector(PoseDetector):
         res = self.gesture_rec.recognize_for_video(mp_img, self._ts_ms)
         h, w = shape[:2]
         seen = {'Left': 'none', 'Right': 'none'}
+        fingers = {'Left': None, 'Right': None}
         for i, handedness in enumerate(res.handedness):
             side = handedness[0].category_name          # image-person anatomy
+            pts = np.array([[lm.x * w, lm.y * h]
+                            for lm in res.hand_landmarks[i]])
             name = res.gestures[i][0].category_name if res.gestures else 'None'
             g = GESTURE_MAP.get(name)
             if g is None:
                 # canned model unsure — fall back to fingertip geometry
-                pts = np.array([[lm.x * w, lm.y * h]
-                                for lm in res.hand_landmarks[i]])
                 g = classify_gesture(pts)
             seen[side] = g
+            # per-finger extension: tip farther from wrist than mid joint
+            wrist = pts[0]
+            def ext(tip, mid):
+                return bool(np.linalg.norm(pts[tip] - wrist) >
+                            np.linalg.norm(pts[mid] - wrist))
+            fingers[side] = [ext(4, 2), ext(8, 6), ext(12, 10),
+                             ext(16, 14), ext(20, 18)]
+        self._fingers = fingers
         for side in ('Left', 'Right'):
             self._votes[side].append(seen[side])
             votes = list(self._votes[side])
             self._gestures[side] = max(set(votes), key=votes.count)
 
-    def face_metrics(self, results, frame_w, frame_h):
-        """Smoothed blendshape expression scores."""
-        return dict(self._face)
+    def face_metrics(self, results, frame_w, frame_h, mirrored=False):
+        """Smoothed blendshape scores; blink sides keyed by screen side."""
+        f = dict(self._face)
+        if mirrored:
+            f['blinkL'], f['blinkR'] = f['blinkR'], f['blinkL']
+        return f
 
     def hand_gestures(self, results, frame_w, frame_h, mirrored=False):
         """Majority-voted gestures keyed by screen side."""
         left, right = self._gestures['Left'], self._gestures['Right']
+        if mirrored:
+            return {'l': right, 'r': left}
+        return {'l': left, 'r': right}
+
+    def finger_states(self, mirrored=False):
+        """Per-finger extension [thumb..pinky] keyed by screen side."""
+        left, right = self._fingers['Left'], self._fingers['Right']
         if mirrored:
             return {'l': right, 'r': left}
         return {'l': left, 'r': right}

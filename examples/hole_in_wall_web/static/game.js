@@ -394,23 +394,23 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   }
   g.lineStyle(0);
 
-  // hands render the player's live finger gesture
+  // hands: always five fingers; each ray's length mirrors that finger live
+  const FAN = [-0.72, -0.34, 0, 0.3, 0.58];   // thumb..pinky spread
   for (const [side, wr, el] of [['l', 'lWr', 'lEl'], ['r', 'rWr', 'rEl']]) {
-    const gesture = live && live.hands ? live.hands[side] : 'none';
-    const rF = gesture === 'fist' ? t * 0.78 : t * 0.62;
+    const states = live && live.fingers && live.fingers[side]
+      ? live.fingers[side] : [true, true, true, true, true];
+    const rF = t * 0.6;
     g.beginFill(COL.extremity).drawCircle(...j[wr], rF).endFill();
     const d = [j[wr][0] - j[el][0], j[wr][1] - j[el][1]];
     const n = Math.hypot(d[0], d[1]) || 1;
     const dir = [d[0] / n, d[1] / n];
-    const rays = gesture === 'open' ? [-0.55, -0.28, 0, 0.28, 0.55]
-      : gesture === 'peace' ? [-0.16, 0.16]
-      : gesture === 'point' ? [0] : [];
-    for (const a of rays) {
+    for (let f = 0; f < 5; f++) {
+      const a = side === 'l' ? FAN[f] : -FAN[f];   // thumb toward the body
       const ca = Math.cos(a), sa = Math.sin(a);
       const rd = [dir[0] * ca - dir[1] * sa, dir[0] * sa + dir[1] * ca];
-      const len = gesture === 'point' ? t * 1.5 : t * 1.05;
+      const len = states[f] ? (f === 0 ? t * 0.8 : t * 1.05) : t * 0.32;
       g.lineStyle({ width: 4.5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND });
-      g.moveTo(j[wr][0] + rd[0] * rF * 0.8, j[wr][1] + rd[1] * rF * 0.8)
+      g.moveTo(j[wr][0] + rd[0] * rF * 0.75, j[wr][1] + rd[1] * rF * 0.75)
         .lineTo(j[wr][0] + rd[0] * (rF + len), j[wr][1] + rd[1] * (rF + len));
       g.lineStyle(0);
     }
@@ -447,9 +447,19 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
     }
     g.lineStyle(0);
   } else {
-    g.beginFill(0x23232b);
-    for (const s of [-1, 1]) g.drawCircle(ex + s * r / 3, ey, Math.max(2.2, r / 9));
-    g.endFill();
+    // eyes mirror the player's: dot when open, lid line when closed
+    const blinks = [live && live.face ? live.face.blinkL : 0,
+                    live && live.face ? live.face.blinkR : 0];
+    for (const [i, s] of [[0, -1], [1, 1]]) {
+      const cx = ex + s * r / 3;
+      if (blinks[i] > 0.5) {
+        g.lineStyle(3, 0x23232b);
+        g.moveTo(cx - r / 7, ey).lineTo(cx + r / 7, ey);
+        g.lineStyle(0);
+      } else {
+        g.beginFill(0x23232b).drawCircle(cx, ey, Math.max(2.2, r / 9)).endFill();
+      }
+    }
     // mouth mirrors the player's live expression
     const smile = live && live.face ? live.face.smile : 0;
     const open = live && live.face ? live.face.open : 0;
@@ -825,7 +835,7 @@ app.ticker.add((dt) => {
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
     { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
-    { face: S.faceLive, hands: S.handsLive });
+    { face: S.faceLive, hands: S.handsLive, fingers: S.fingersLive });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();

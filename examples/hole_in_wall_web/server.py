@@ -547,7 +547,7 @@ def _capture_session(pose_det, game):
                 game.note_legs(body, now)
                 game.note_px(body)
                 game.note_face_hands(
-                    pose_det.face_metrics(results, FRAME_W, FRAME_H),
+                    pose_det.face_metrics(results, FRAME_W, FRAME_H, mirrored=True),
                     pose_det.hand_gestures(results, FRAME_W, FRAME_H, mirrored=True))
                 if game.pose is not None and game.state == 'WALL':
                     match, seg_ok = game.full_match(body, now)
@@ -631,6 +631,7 @@ def _capture_session(pose_det, game):
                 'handsReq': game.pose.get('hands') if game.pose else None,
                 'faceLive': game._face,
                 'handsLive': game._hands,
+                'fingersLive': pose_det.finger_states(mirrored=True),
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,
