@@ -15,6 +15,7 @@ Then play at http://localhost:8765 (opens automatically).
 
 import asyncio
 import base64
+import os
 import json
 import sys
 import threading
@@ -31,11 +32,220 @@ from src.pose_detection.detector import PoseDetector
 from src.render.stickman import pose_from_body
 from src.utils.filters import OneEuroFilter
 from examples.hole_in_wall_game import (
-    HoleInWallGame, match_pose, COUNTDOWN_SECS, RESULT_SECS,
+    HoleInWallGame, match_pose, seg_angle, ang_diff, POSES, EASY_POOL,
+    MATCH_TOLERANCE, FALLOFF, PASS_THRESHOLD, GRACE_WINDOW,
+    ROUND_TIME_MIN, ROUND_TIME_STEP, PERFECT_MATCH,
+    COUNTDOWN_SECS, RESULT_SECS, HIGHSCORE_PATH,
     FILTER_MIN_CUTOFF, FILTER_BETA, FRAME_W, FRAME_H)
 
 PORT = 8765
 STATIC = Path(__file__).parent / 'static'
+
+# Poses beyond the base set: torso leans (work seated) and a squat (needs the
+# player's legs in frame — gated on leg visibility). 'lean' is the target
+# angle of the shoulders->hips segment (-90 = upright); 'legs' are target
+# thigh/shin angles keyed like the stickman pose.
+LEAN_TOLERANCE = 14.0
+WEB_POSES = POSES + [
+    {'name': 'LEAN LEFT', 'angles': {'lu': 200, 'lf': 200, 'ru': 20, 'rf': 20},
+     'lean': -72},
+    {'name': 'LEAN RIGHT', 'angles': {'lu': 160, 'lf': 160, 'ru': -20, 'rf': -20},
+     'lean': -108},
+    {'name': 'SQUAT', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'legs': {'lt': -128, 'ls': -85, 'rt': -52, 'rs': -95}, 'needs_legs': True},
+    {'name': 'SQUAT GOALPOST', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
+     'legs': {'lt': -128, 'ls': -85, 'rt': -52, 'rs': -95}, 'needs_legs': True},
+]
+
+
+def torso_angle(body):
+    """Angle of the shoulders-center -> hips-center segment, or None."""
+    for k in ('l_shoulder', 'r_shoulder', 'l_hip', 'r_hip'):
+        if body.get(k + '_vis', 0) < 0.3:
+            return None
+    shc = (body['l_shoulder'] + body['r_shoulder']) / 2
+    hipc = (body['l_hip'] + body['r_hip']) / 2
+    v = hipc - shc
+    return float(np.degrees(np.arctan2(-v[1], v[0])))
+
+
+def match_pose_ex(body, pose):
+    """Arms matcher extended with optional torso lean and thigh targets."""
+    match, seg_ok = match_pose(body, pose['angles'])
+    if match is None:
+        return None, seg_ok
+    scores = [match] * 4  # arms, weighted as before
+
+    if 'lean' in pose:
+        cur = torso_angle(body)
+        if cur is not None:
+            err = ang_diff(cur, pose['lean'])
+            seg_ok['lean'] = err < LEAN_TOLERANCE
+            scores.append(float(np.clip(
+                1.0 - max(err - LEAN_TOLERANCE, 0.0) / 25.0, 0.0, 1.0)))
+
+    if 'legs' in pose:
+        # Tight tolerance and double weight per thigh: with four arm segments
+        # in the mean, generous leg scoring would let a standing player pass
+        # a squat wall.
+        for a, b, key in (('l_hip', 'l_knee', 'lt'), ('r_hip', 'r_knee', 'rt')):
+            cur = seg_angle(body, a, b)
+            if cur is None:
+                continue
+            err = ang_diff(cur, pose['legs'][key])
+            seg_ok[key] = err < 15.0
+            leg_score = float(np.clip(1.0 - max(err - 15.0, 0.0) / 30.0, 0.0, 1.0))
+            scores.extend([leg_score, leg_score])
+
+    return float(np.mean(scores)), seg_ok
+
+
+def legs_visible(body):
+    return body is not None and all(
+        body.get(k + '_vis', 0) > 0.35
+        for k in ('l_knee', 'r_knee', 'l_ankle', 'r_ankle'))
+
+
+class WebGame(HoleInWallGame):
+    """Adds a menu, endless/daily modes, extended poses, and a hold bonus."""
+
+    def __init__(self, now):
+        self.mode = 'endless'
+        self.daily_date = None
+        self.daily_scores = {}
+        self.legs_ok_until = 0.0
+        super().__init__(now)
+        self.state = 'MENU'
+        self._load_daily()
+
+    # -- persistence for the daily mode (same file as the high score)
+    def _load_daily(self):
+        try:
+            with open(HIGHSCORE_PATH) as f:
+                self.daily_scores = json.load(f).get('daily', {})
+        except (OSError, ValueError):
+            self.daily_scores = {}
+
+    def _save_high_score(self):
+        try:
+            os.makedirs(os.path.dirname(HIGHSCORE_PATH), exist_ok=True)
+            with open(HIGHSCORE_PATH, 'w') as f:
+                json.dump({'high_score': self.high_score,
+                           'daily': self.daily_scores}, f)
+        except OSError:
+            pass
+
+    def start(self, now, mode):
+        self.mode = mode
+        self.reset(now)
+        self._hold = 0.0
+        self._last_t = now
+        if mode == 'daily':
+            self.daily_date = time.strftime('%Y-%m-%d')
+            self._rng = np.random.RandomState(int(time.strftime('%Y%m%d')))
+        else:
+            self._rng = np.random.RandomState()
+
+    def reset(self, now):
+        super().reset(now)
+        self._hold = 0.0
+        self._last_t = now
+        self.last_gain = None
+
+    def note_legs(self, body, now):
+        if legs_visible(body):
+            self.legs_ok_until = now + 3.0
+
+    def _pool(self, now=None):
+        now = time.time() if now is None else now
+        pool = WEB_POSES[:EASY_POOL] if self.level == 1 else WEB_POSES
+        if now > self.legs_ok_until:
+            pool = [p for p in pool if not p.get('needs_legs')]
+        return pool
+
+    def new_wall(self, now):
+        pool = self._pool(now)
+        if not self._order:
+            self._order = self._rng.permutation(len(pool)).tolist()
+        idx = self._order.pop(0) % len(pool)
+        if self.pose is not None and pool[idx] is self.pose and self._order:
+            idx = self._order.pop(0) % len(pool)
+        self.pose = pool[idx]
+        self.deadline = now + self.round_time
+        self.state = 'WALL'
+        self.state_t0 = now
+        self._recent = []
+        self._hold = 0.0
+
+    def target_payload(self):
+        if self.pose is None:
+            return None
+        t = dict(self.pose['angles'])
+        if 'lean' in self.pose:
+            t['lean'] = self.pose['lean']
+        if 'legs' in self.pose:
+            t['legs'] = self.pose['legs']
+        return t
+
+    def update(self, match, now):
+        dt = min(now - self._last_t, 0.2)
+        self._last_t = now
+
+        if self.state == 'MENU':
+            return None
+
+        if self.state == 'WALL':
+            if match is not None:
+                self._recent.append((now, match))
+                if match >= PASS_THRESHOLD:
+                    self._hold += dt   # reward locking the pose early
+            self._recent = [(t, m) for t, m in self._recent
+                            if now - t <= GRACE_WINDOW]
+            if self.time_left(now) > 0:
+                return None
+            if self._recent:
+                match = max(m for _, m in self._recent)
+            if match is not None and match >= PASS_THRESHOLD:
+                self.walls_passed += 1
+                self.streak += 1
+                perfect = match >= PERFECT_MATCH
+                bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
+                points = 100 * self.multiplier + (50 if perfect else 0) + bonus
+                self.score += points
+                self.round_time = max(ROUND_TIME_MIN,
+                                      self.round_time - ROUND_TIME_STEP)
+                self.result = ('pass', match)
+                self.last_gain = {'points': points, 'perfect': perfect,
+                                  'bonus': bonus}
+                outcome = 'perfect' if perfect else 'pass'
+            else:
+                self.lives -= 1
+                self.streak = 0
+                self.result = ('crash', match or 0.0)
+                outcome = 'crash'
+            self.state = 'RESULT'
+            self.state_t0 = now
+            return outcome
+
+        if self.state == 'RESULT':
+            if now - self.state_t0 >= RESULT_SECS:
+                if self.lives <= 0:
+                    self.state = 'GAME_OVER'
+                    self.state_t0 = now
+                    self.new_record = self.score > self.high_score
+                    if self.new_record:
+                        self.high_score = self.score
+                    if self.mode == 'daily':
+                        prev = self.daily_scores.get(self.daily_date, 0)
+                        self.daily_scores[self.daily_date] = max(prev, self.score)
+                    self._save_high_score()
+                else:
+                    self.new_wall(now)
+            return None
+
+        if self.state == 'COUNTDOWN':
+            return super().update(match, now)
+        return None
 
 LOCK = threading.Lock()
 LATEST = None          # most recent payload dict (with accumulated events)
@@ -61,7 +271,7 @@ def capture_loop():
     """
     global RUNNING
     pose_det = PoseDetector(confidence=0.5, model_complexity=1)
-    game = HoleInWallGame(time.time())
+    game = WebGame(time.time())
     game.sounds.paths = {}          # browser plays the sounds instead
 
     while RUNNING:
@@ -128,8 +338,9 @@ def _capture_session(pose_det, game):
             if body is not None:
                 for name in PoseDetector.BODY:
                     body[name] = filters[name].apply(body[name])
-                if game.pose is not None:
-                    match, seg_ok = match_pose(body, game.pose['angles'])
+                game.note_legs(body, now)
+                if game.pose is not None and game.state == 'WALL':
+                    match, seg_ok = match_pose_ex(body, game.pose)
             else:
                 for f in filters.values():
                     f.reset()
@@ -138,9 +349,15 @@ def _capture_session(pose_det, game):
             with LOCK:
                 flags = set(FLAGS)
                 FLAGS.clear()
-            if 'restart' in flags and game.state == 'GAME_OVER':
-                game.reset(now)
-                events.append('go')
+            if 'restart' in flags:
+                if game.state == 'MENU':
+                    game.start(now, 'endless')
+                elif game.state == 'GAME_OVER':
+                    game.start(now, game.mode)
+            if 'daily' in flags and game.state in ('MENU', 'GAME_OVER'):
+                game.start(now, 'daily')
+            if 'menu' in flags and game.state == 'GAME_OVER':
+                game.state = 'MENU'
             if 'skip' in flags and game.state == 'WALL':
                 game.new_wall(now)
 
@@ -148,8 +365,7 @@ def _capture_session(pose_det, game):
             prev_tick = game._last_tick
             outcome = game.update(match, now)
             if outcome:
-                perfect = outcome == 'pass' and game.result[1] >= 0.90
-                events.append('perfect' if perfect else outcome)
+                events.append(outcome)
             if game.state == 'COUNTDOWN' and game._last_tick != prev_tick:
                 events.append('go' if game._last_tick <= 0 else 'tick')
             if game.state == 'GAME_OVER' and prev_state != 'GAME_OVER':
@@ -165,7 +381,7 @@ def _capture_session(pose_det, game):
             data = {
                 'state': game.state,
                 'pose': payload_pose(pose_from_body(body)),
-                'targetAngles': game.pose['angles'] if game.pose else None,
+                'targetAngles': game.target_payload(),
                 'poseName': game.pose['name'] if game.pose else '',
                 'match': match,
                 'segOk': seg_ok,
@@ -183,6 +399,12 @@ def _capture_session(pose_det, game):
                 'mult': game.multiplier,
                 'highScore': game.high_score,
                 'newRecord': game.new_record,
+                'mode': game.mode,
+                'dailyDate': game.daily_date,
+                'dailyBest': game.daily_scores.get(game.daily_date, 0)
+                             if game.daily_date else 0,
+                'lastGain': game.last_gain,
+                'holdT': round(getattr(game, '_hold', 0.0), 2),
                 'pip': pip_b64,
             }
             with LOCK:
@@ -209,7 +431,7 @@ async def ws_handler(request):
                     key = json.loads(msg.data).get('key')
                 except ValueError:
                     continue
-                if key in ('restart', 'skip'):
+                if key in ('restart', 'skip', 'daily', 'menu'):
                     with LOCK:
                         FLAGS.add(key)
     finally:

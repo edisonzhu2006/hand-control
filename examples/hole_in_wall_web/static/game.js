@@ -32,7 +32,9 @@ const app = new PIXI.Application({
 });
 document.getElementById('wrap').prepend(app.view);
 
-const root = new PIXI.Container();      // shakeable
+const root = new PIXI.Container();      // shakeable + zoom-pulsable
+root.pivot.set(W / 2, H / 2);
+root.position.set(W / 2, H / 2);
 app.stage.addChild(root);
 
 const bgLayer = new PIXI.Container();
@@ -168,6 +170,10 @@ function poseFromAngles(angles) {
   const p = defaultPose();
   p.lu = dirFromAngle(angles.lu); p.lf = dirFromAngle(angles.lf);
   p.ru = dirFromAngle(angles.ru); p.rf = dirFromAngle(angles.rf);
+  if (angles.lean !== undefined) p.lean = dirFromAngle(angles.lean);
+  if (angles.legs) {
+    for (const k of ['lt', 'ls', 'rt', 'rs']) p[k] = dirFromAngle(angles.legs[k]);
+  }
   return p;
 }
 
@@ -309,9 +315,9 @@ function ensureWall(state) {
 
 /* ------------------------------------------------------------- the avatar */
 
-function drawAvatar(g, pose, face, segOk) {
+function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
   g.clear();
-  const j = skeleton(ANCHOR, pose);
+  const j = skeleton(anchor, pose);
   const t = SM.t;
   const line = (a, b, w, color) => {
     g.lineStyle({ width: w, color, cap: PIXI.LINE_CAP.ROUND });
@@ -415,17 +421,33 @@ ui.sub.anchor.set(0.5); ui.sub.position.set(W / 2, H - 46);
 uiLayer.addChild(ui.meterG, ui.heartsG, ui.chipG, ui.poseName, ui.timer,
   ui.score, ui.level, ui.sub, ui.big, ui.over);
 
+// menu texts
+const menuTitle = mkText(58, 0xf0ede4, 0x000000, 8);
+const menuSub = mkText(20, 0xdddddd, 0x000000, 4, FONT_UI);
+const menuHigh = mkText(16, 0x9aa5b0, 0x000000, 3, FONT_UI);
+menuTitle.anchor.set(0.5); menuTitle.position.set(W / 2, 96);
+menuSub.anchor.set(0.5); menuSub.position.set(W / 2, H - 74);
+menuHigh.anchor.set(0.5); menuHigh.position.set(W / 2, H - 40);
+uiLayer.addChild(menuTitle, menuSub, menuHigh);
+
+// lock indicator while holding a matched pose
+const lockText = mkText(17, 0x7ce89a, 0x000000, 4, FONT_UI);
+lockText.anchor.set(0.5); lockText.position.set(W / 2, 236);
+uiLayer.addChild(lockText);
+
 // game-over panel
 const overBg = new PIXI.Graphics();
 const overTitle = mkText(64, 0xff5555, 0x000000, 8);
 const overScore = mkText(36, 0xffffff);
 const overHigh = mkText(24, 0xcccccc);
-const overHint = mkText(18, 0xbbbbbb);
+const overMode = mkText(17, 0xd8b06a, 0x000000, 3, FONT_UI);
+const overHint = mkText(16, 0xbbbbbb, 0x000000, 3, FONT_UI);
 overTitle.anchor.set(0.5); overScore.anchor.set(0.5);
-overHigh.anchor.set(0.5); overHint.anchor.set(0.5);
+overHigh.anchor.set(0.5); overMode.anchor.set(0.5); overHint.anchor.set(0.5);
 overTitle.position.set(W / 2, H / 2 - 90); overScore.position.set(W / 2, H / 2 - 10);
-overHigh.position.set(W / 2, H / 2 + 40); overHint.position.set(W / 2, H / 2 + 90);
-ui.over.addChild(overBg, overTitle, overScore, overHigh, overHint);
+overHigh.position.set(W / 2, H / 2 + 40); overMode.position.set(W / 2, H / 2 + 76);
+overHint.position.set(W / 2, H / 2 + 116);
+ui.over.addChild(overBg, overTitle, overScore, overHigh, overMode, overHint);
 
 function drawHearts(lives) {
   const g = ui.heartsG;
@@ -475,8 +497,23 @@ function drawChip(angles) {
 
 let shake = 0;
 let flashA = 0;
+let pulse = 0;
 const parts = [];
 const popups = [];
+
+function confetti() {
+  const colors = [0x66e07a, 0xffd35c, 0xff7ab8, 0x7ab8ff, 0xf0ede4];
+  for (let i = 0; i < 60; i++) {
+    const a = Math.random() * Math.PI - Math.PI;   // upward fan
+    const sp = 250 + Math.random() * 520;
+    parts.push({
+      x: W / 2 + (Math.random() - 0.5) * 160, y: H * 0.45,
+      vx: Math.cos(a) * sp * 0.6, vy: -Math.abs(Math.sin(a)) * sp,
+      s: 4 + Math.random() * 7, life: 0.8 + Math.random() * 0.8,
+      c: colors[(Math.random() * colors.length) | 0],
+    });
+  }
+}
 
 function burst(x, y) {
   for (let i = 0; i < 34; i++) {
@@ -504,7 +541,7 @@ const audio = AC ? new AC() : null;
 document.addEventListener('click', () => audio && audio.resume(), { once: true });
 
 function beep(freq, dur = 0.1, type = 'square', gain = 0.08, when = 0) {
-  if (!audio || audio.state !== 'running') return;
+  if (!audio || audio.state !== 'running' || !audioOn) return;
   const t0 = audio.currentTime + when;
   const o = audio.createOscillator(), g = audio.createGain();
   o.type = type; o.frequency.value = freq;
@@ -515,7 +552,7 @@ function beep(freq, dur = 0.1, type = 'square', gain = 0.08, when = 0) {
 }
 
 function noiseBurst(dur = 0.25, gain = 0.15) {
-  if (!audio || audio.state !== 'running') return;
+  if (!audio || audio.state !== 'running' || !audioOn) return;
   const n = audio.sampleRate * dur;
   const buf = audio.createBuffer(1, n, audio.sampleRate);
   const d = buf.getChannelData(0);
@@ -524,6 +561,39 @@ function noiseBurst(dur = 0.25, gain = 0.15) {
   src.buffer = buf; g.gain.value = gain;
   src.connect(g).connect(audio.destination);
   src.start();
+}
+
+let audioOn = true;
+
+// Lookahead-scheduled synth loop; tempo rises as the wall closes in.
+const music = {
+  next: 0, beat: 0, bpm: 96,
+  tick() {
+    if (!audio || audio.state !== 'running' || !audioOn) return;
+    if (this.next < audio.currentTime - 0.5) this.next = audio.currentTime + 0.02;
+    while (this.next < audio.currentTime + 0.15) {
+      const when = this.next - audio.currentTime;
+      const b = this.beat % 8;
+      if (b % 2 === 0) beep(55, 0.1, 'sine', 0.11, when);                  // kick
+      beep(6800, 0.018, 'square', b % 2 ? 0.016 : 0.009, when);            // hat
+      if (b % 2 === 1) {
+        const bass = [0, 0, 3, 5][(this.beat >> 1) % 4];
+        beep(110 * Math.pow(2, bass / 12), 0.14, 'triangle', 0.05, when);  // bass
+      }
+      this.next += 60 / this.bpm / 2;
+      this.beat++;
+    }
+  },
+};
+
+// Speech-synthesis announcer: off — the macOS TTS voice sounded bad.
+let voiceOn = false;
+function say(text) {
+  if (!voiceOn || !audioOn || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(text.toLowerCase());
+  u.rate = 1.15; u.pitch = 1.05; u.volume = 0.9;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
 }
 
 const SFX = {
@@ -553,9 +623,13 @@ function connect() {
       if (SFX[ev]) SFX[ev]();
       if (ev === 'crash') { shake = 1; flashA = 0.55; burst(W / 2, H * 0.5); }
       if (ev === 'pass' || ev === 'perfect') {
-        popup(`+${100 * S.mult + (ev === 'perfect' ? 50 : 0)}${ev === 'perfect' ? ' PERFECT!' : ''}`,
-          W / 2, 150, 0x66ff99);
+        pulse = 1;
+        const gain = S.lastGain || { points: 100 * S.mult, perfect: ev === 'perfect', bonus: 0 };
+        popup(`+${gain.points}${gain.perfect ? '  PERFECT!' : ''}`, W / 2, 150, 0x66ff99);
+        if (gain.bonus >= 10) popup(`hold bonus +${gain.bonus}`, W / 2, 186, 0xa8e6ff);
+        if (ev === 'perfect') { confetti(); say('perfect!'); }
       }
+      if (ev === 'gameover') say('game over');
     }
     if (S.pip) pip.src = 'data:image/jpeg;base64,' + S.pip;
   };
@@ -569,7 +643,39 @@ function sendKey(key) {
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { sendKey('restart'); e.preventDefault(); }
   if (e.key === 's') sendKey('skip');
+  if (e.key === 'd') sendKey('daily');
+  if (e.key === 'm') { audioOn = !audioOn; if (!audioOn) speechSynthesis?.cancel(); }
+  if (e.key === 'c' && S && S.state === 'GAME_OVER') downloadScoreCard();
 });
+
+function downloadScoreCard() {
+  const cv = document.createElement('canvas');
+  cv.width = 840; cv.height = 440;
+  const ctx = cv.getContext('2d');
+  const bg = ctx.createLinearGradient(0, 0, 0, 440);
+  bg.addColorStop(0, '#191927'); bg.addColorStop(1, '#0d0d14');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, 840, 440);
+  ctx.strokeStyle = '#b8623c'; ctx.lineWidth = 6; ctx.strokeRect(10, 10, 820, 420);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f0ede4';
+  ctx.font = '46px "Luckiest Guy", "Arial Black"';
+  ctx.fillText('HOLE IN THE WALL', 420, 92);
+  ctx.font = '80px "Luckiest Guy", "Arial Black"';
+  ctx.fillStyle = '#7ce89a';
+  ctx.fillText(String(S.score), 420, 214);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '600 22px Rubik, sans-serif';
+  const mode = S.mode === 'daily' ? `DAILY CHALLENGE ${S.dailyDate}` : 'ENDLESS MODE';
+  ctx.fillText(mode, 420, 268);
+  ctx.fillText(`high score ${S.highScore}`, 420, 306);
+  ctx.fillStyle = '#666';
+  ctx.font = '600 16px Rubik, sans-serif';
+  ctx.fillText('strike the pose - fit through the wall', 420, 396);
+  const a = document.createElement('a');
+  a.download = `hole-in-the-wall-${S.score}.png`;
+  a.href = cv.toDataURL('image/png');
+  a.click();
+}
 
 /* ------------------------------------------------------------ render loop */
 
@@ -580,20 +686,39 @@ drawHearts(3);
 let smoothScale = 0.22;
 let lastBig = '';
 let bigPop = 1;
+let lastPoseName = '';
 
 app.ticker.add((dt) => {
   const dts = dt / 60;
   if (!S) return;
 
-  // shake decay
+  // shake decay + pass zoom pulse share the centered root transform
   if (shake > 0.01) {
-    root.position.set((Math.random() - 0.5) * 26 * shake, (Math.random() - 0.5) * 26 * shake);
+    root.position.set(W / 2 + (Math.random() - 0.5) * 26 * shake,
+      H / 2 + (Math.random() - 0.5) * 26 * shake);
     shake *= Math.pow(0.02, dts);
-  } else root.position.set(0, 0);
+  } else root.position.set(W / 2, H / 2);
+  if (pulse > 0.01) {
+    root.scale.set(1 + 0.05 * pulse);
+    pulse *= Math.pow(0.01, dts);
+  } else root.scale.set(1);
 
-  // avatar
+  // music tempo rises as the wall closes in
+  music.bpm = 96 + (S.state === 'WALL' ? 74 * S.progress : 0);
+  music.tick();
+
+  // announce each new wall's pose
+  if (S.state === 'WALL' && S.poseName !== lastPoseName) {
+    lastPoseName = S.poseName;
+    say(S.poseName);
+  }
+  if (S.state === 'MENU') lastPoseName = '';
+
+  // avatar breathes
+  const breath = Math.sin(performance.now() / 640) * 2.2;
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
-  drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null);
+  drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
+    { x: ANCHOR.x, y: ANCHOR.y + breath });
 
   // wall
   wallBehind.removeChildren(); wallFront.removeChildren();
@@ -605,9 +730,11 @@ app.ticker.add((dt) => {
     wallSprite.tint = (S.match ?? 0) >= PASS_THRESHOLD ? 0xccffcc : 0xffffff;
     (smoothScale < 0.9 ? wallBehind : wallFront).addChild(wallSprite);
   } else if (S.state === 'RESULT' && S.outcome === 'pass' && wallSprite) {
-    const z = 1 + 2.4 * Math.pow(S.resultT, 1.5);
+    // brief impact hold (slow-mo beat), then accelerate through the hole
+    const zt = Math.max(0, (S.resultT - 0.22) / 0.78);
+    const z = 1 + 0.05 * Math.min(S.resultT / 0.22, 1) + 2.6 * Math.pow(zt, 1.6);
     wallSprite.scale.set(z);
-    wallSprite.alpha = Math.max(0, 1 - S.resultT * 0.8);
+    wallSprite.alpha = Math.max(0, 1 - zt * 0.85);
     wallFront.addChild(wallSprite);
   } else {
     smoothScale = 0.22;
@@ -638,13 +765,23 @@ app.ticker.add((dt) => {
   }
 
   // HUD
-  drawHearts(S.lives);
-  ui.score.text = `SCORE ${S.score}`;
-  ui.level.text = `LVL ${S.level}   x${S.mult}`;
+  drawHearts(S.state === 'MENU' ? 0 : S.lives);
+  ui.heartsG.visible = S.state !== 'MENU';
+  ui.score.text = S.state === 'MENU' ? '' : `SCORE ${S.score}`;
+  ui.level.text = S.state === 'MENU' ? '' : `LVL ${S.level}   x${S.mult}`;
   ui.over.visible = false;
   ui.big.text = ''; ui.sub.text = '';
   ui.poseName.text = ''; ui.timer.text = '';
+  menuTitle.text = ''; menuSub.text = ''; menuHigh.text = '';
+  lockText.text = '';
   drawMeter(null); drawChip(null);
+
+  if (S.state === 'MENU') {
+    menuTitle.text = 'HOLE IN THE WALL';
+    menuSub.text = 'SPACE - endless    D - daily challenge    M - mute';
+    menuHigh.text = `high score ${S.highScore}` +
+      (S.dailyBest ? `    daily best ${S.dailyBest}` : '');
+  }
 
   if (S.state === 'WALL') {
     ui.poseName.text = S.poseName;
@@ -654,6 +791,9 @@ app.ticker.add((dt) => {
     drawChip(S.targetAngles);
     if (!S.tracked) ui.sub.text = 'Step back so the camera sees both your arms';
     else if (S.match == null) ui.sub.text = 'Move back a bit - both arms need to be in view';
+    if ((S.match ?? 0) >= PASS_THRESHOLD && S.holdT > 0.15) {
+      lockText.text = `LOCKED  +${Math.floor(Math.min(S.holdT, 2) * 30)}`;
+    }
   } else if (S.state === 'COUNTDOWN') {
     ui.big.text = S.countdown > 0 ? String(S.countdown) : 'GO!';
     const pulse = 1 + 0.25 * (1 - ((S.countdown ?? 0) % 1));
@@ -669,7 +809,9 @@ app.ticker.add((dt) => {
     overScore.text = `SCORE  ${S.score}`;
     overHigh.text = S.newRecord ? `NEW HIGH SCORE!  ${S.highScore}` : `HIGH SCORE  ${S.highScore}`;
     overHigh.style.fill = S.newRecord ? 0x66ff99 : 0xcccccc;
-    overHint.text = 'press SPACE to play again';
+    overMode.text = S.mode === 'daily'
+      ? `DAILY ${S.dailyDate}   best today ${S.dailyBest}` : 'ENDLESS';
+    overHint.text = 'SPACE play again  |  D daily  |  C save score card';
   }
 
   // pop-in on every big-text change (countdown digits, GO!, THROUGH!, CRASHED!)
