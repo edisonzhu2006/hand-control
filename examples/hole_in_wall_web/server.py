@@ -477,6 +477,13 @@ class WebGame(HoleInWallGame):
         super()._finish_game(now)
 
 
+LOCK = threading.Lock()
+CLIENTS = set()        # connected websockets (shared with the capture thread)
+LATEST = None          # most recent payload dict (with accumulated events)
+FLAGS = set()          # input flags from the browser: 'restart', 'skip'
+RUNNING = True
+
+
 def payload_pose(pose):
     """Stickman pose dict -> JSON-safe structure."""
     out = {}
