@@ -84,6 +84,49 @@ class PoseDetector:
         arm['visibility'] = vis
         return arm
 
+    # Landmarks used by get_body: head, both arms, and both legs.
+    BODY = {
+        'nose': 0,
+        'l_shoulder': 11, 'r_shoulder': 12,
+        'l_elbow': 13, 'r_elbow': 14,
+        'l_wrist': 15, 'r_wrist': 16,
+        'l_hip': 23, 'r_hip': 24,
+        'l_knee': 25, 'r_knee': 26,
+        'l_ankle': 27, 'r_ankle': 28,
+    }
+
+    def get_body(self, results, frame_w, frame_h, mirrored=False):
+        """Extract head, arms and legs as pixel coordinates.
+
+        Args:
+            results: MediaPipe pose results.
+            frame_w: Frame width.
+            frame_h: Frame height.
+            mirrored: Set True when detection ran on a horizontally flipped
+                (selfie-mirror) frame. MediaPipe labels sides by the image
+                person's anatomy, which is opposite to screen side in a
+                mirrored frame — this swaps l_/r_ so keys mean screen side.
+
+        Returns:
+            A dict mapping each BODY key to an (x, y) pixel array plus a
+            '<key>_vis' visibility score, or None if no pose is detected.
+        """
+        if not results.pose_landmarks:
+            return None
+
+        lms = results.pose_landmarks.landmark
+        body = {}
+        for name, idx in self.BODY.items():
+            if mirrored:
+                if name.startswith('l_'):
+                    name = 'r_' + name[2:]
+                elif name.startswith('r_'):
+                    name = 'l_' + name[2:]
+            lm = lms[idx]
+            body[name] = np.array([lm.x * frame_w, lm.y * frame_h], dtype=float)
+            body[name + '_vis'] = float(lm.visibility)
+        return body
+
     def draw(self, frame, results):
         """Draw the full pose skeleton on the frame."""
         if results.pose_landmarks:

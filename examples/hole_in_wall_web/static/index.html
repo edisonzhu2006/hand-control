@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hole in the Wall</title>
+<link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Rubik:wght@600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0a14; overflow: hidden;
+               display: flex; align-items: center; justify-content: center; }
+  /* fill the window (16:9 letterboxed), canvas scales up crisply */
+  #wrap { position: relative; width: min(98vw, calc(96vh * 16 / 9)); }
+  canvas { display: block; border-radius: 10px;
+           width: 100% !important; height: auto !important; }
+  #pipbox { position: absolute; top: 1.6%; right: 1.2%; width: 21.7%; z-index: 5; }
+  #pip { display: block; width: 100%; border: 1px solid rgba(255,255,255,.25);
+         border-radius: 10px; background: #000;
+         box-shadow: 0 6px 22px rgba(0,0,0,.55); }
+  #piplabel { color: #8b8b96; font: 600 11px Rubik, sans-serif; text-align: right;
+              margin-top: 3px; }
+  #hint { position: absolute; bottom: 1.2%; left: 1.4%; color: #667;
+          font: 600 12px Rubik, sans-serif; z-index: 5; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="pipbox">
+    <img id="pip" alt="">
+    <div id="piplabel">camera</div>
+  </div>
+  <div id="hint">SPACE start &nbsp;|&nbsp; D daily &nbsp;|&nbsp; T 2-player &nbsp;|&nbsp; L leg mode &nbsp;|&nbsp; S skip &nbsp;|&nbsp; M mute &nbsp;|&nbsp; C score card</div>
+</div>
+<script src="/static/vendor/pixi-legacy.min.js"></script>
+<script src="/static/vendor/pixi-filters.min.js"></script>
+<script src="/static/game.js"></script>
+</body>
+</html>
