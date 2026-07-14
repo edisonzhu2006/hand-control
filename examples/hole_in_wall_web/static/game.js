@@ -358,7 +358,7 @@ function ensureWall(state) {
 
 /* ------------------------------------------------------------- the avatar */
 
-function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
+function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   g.clear();
   const j = skeleton(anchor, pose);
   const t = SM.t;
@@ -394,9 +394,26 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
   }
   g.lineStyle(0);
 
-  // hands / feet in the outline tone
-  for (const wr of ['lWr', 'rWr']) {
-    g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62).endFill();
+  // hands render the player's live finger gesture
+  for (const [side, wr, el] of [['l', 'lWr', 'lEl'], ['r', 'rWr', 'rEl']]) {
+    const gesture = live && live.hands ? live.hands[side] : 'none';
+    const rF = gesture === 'fist' ? t * 0.78 : t * 0.62;
+    g.beginFill(COL.extremity).drawCircle(...j[wr], rF).endFill();
+    const d = [j[wr][0] - j[el][0], j[wr][1] - j[el][1]];
+    const n = Math.hypot(d[0], d[1]) || 1;
+    const dir = [d[0] / n, d[1] / n];
+    const rays = gesture === 'open' ? [-0.55, -0.28, 0, 0.28, 0.55]
+      : gesture === 'peace' ? [-0.16, 0.16]
+      : gesture === 'point' ? [0] : [];
+    for (const a of rays) {
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const rd = [dir[0] * ca - dir[1] * sa, dir[0] * sa + dir[1] * ca];
+      const len = gesture === 'point' ? t * 1.5 : t * 1.05;
+      g.lineStyle({ width: 4.5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND });
+      g.moveTo(j[wr][0] + rd[0] * rF * 0.8, j[wr][1] + rd[1] * rF * 0.8)
+        .lineTo(j[wr][0] + rd[0] * (rF + len), j[wr][1] + rd[1] * (rF + len));
+      g.lineStyle(0);
+    }
   }
   for (const [an, s] of [['lAn', -1], ['rAn', 1]]) {
     g.beginFill(COL.extremity)
@@ -433,6 +450,26 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR) {
     g.beginFill(0x23232b);
     for (const s of [-1, 1]) g.drawCircle(ex + s * r / 3, ey, Math.max(2.2, r / 9));
     g.endFill();
+    // mouth mirrors the player's live expression
+    const smile = live && live.face ? live.face.smile : 0;
+    const open = live && live.face ? live.face.open : 0;
+    const my = j.head[1] + r * 0.38;
+    if (open > 0.25) {
+      g.lineStyle(3, 0x23232b).beginFill(0x361a1a)
+        .drawEllipse(ex, my, r * 0.2 + r * 0.1 * open, r * 0.32 * open)
+        .endFill().lineStyle(0);
+    } else if (smile > 0.12) {
+      g.lineStyle(3.2, 0x23232b);
+      const mr = r * (0.2 + 0.26 * smile);
+      const a0 = 0.2 * Math.PI, a1 = 0.8 * Math.PI;
+      g.moveTo(ex + mr * Math.cos(a0), my - r * 0.14 + mr * Math.sin(a0));
+      g.arc(ex, my - r * 0.14, mr, a0, a1);
+      g.lineStyle(0);
+    } else {
+      g.lineStyle(3, 0x23232b);
+      g.moveTo(ex - r * 0.16, my).lineTo(ex + r * 0.16, my);
+      g.lineStyle(0);
+    }
   }
 }
 
@@ -479,6 +516,11 @@ uiLayer.addChild(menuTitle, menuSub, menuHigh);
 const lockText = mkText(17, 0x7ce89a, 0x000000, 4, FONT_UI);
 lockText.anchor.set(0.5); lockText.position.set(W / 2, 236);
 uiLayer.addChild(lockText);
+
+// face/hand requirement indicators
+const reqText = mkText(16, 0xffffff, 0x000000, 4, FONT_UI);
+reqText.anchor.set(0.5); reqText.position.set(W / 2, 106);
+uiLayer.addChild(reqText);
 
 // game-over panel
 const overBg = new PIXI.Graphics();
@@ -781,7 +823,8 @@ app.ticker.add((dt) => {
   holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
-    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath });
+    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
+    { face: S.faceLive, hands: S.handsLive });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
@@ -848,7 +891,7 @@ app.ticker.add((dt) => {
   ui.big.text = ''; ui.sub.text = '';
   ui.poseName.text = ''; ui.timer.text = '';
   menuTitle.text = ''; menuSub.text = ''; menuHigh.text = '';
-  lockText.text = '';
+  lockText.text = ''; reqText.text = '';
   drawMeter(null); drawChip(null);
 
   if (S.state === 'MENU') {
@@ -865,6 +908,16 @@ app.ticker.add((dt) => {
 
   if (S.state === 'WALL') {
     ui.poseName.text = S.poseName + (S.tight ? '  -  TIGHT x2!' : '');
+    const reqs = [];
+    if (S.faceReq) {
+      reqs.push(`${S.faceReq === 'smile' ? 'SMILE' : 'WOW MOUTH'} ${S.segOk && S.segOk.face ? 'OK!' : '...'}`);
+    }
+    if (S.handsReq) {
+      reqs.push(`${S.handsReq.toUpperCase()} HANDS ${S.segOk && S.segOk.hands ? 'OK!' : '...'}`);
+    }
+    reqText.text = reqs.join('    ');
+    reqText.style.fill = (S.segOk && ((S.faceReq && !S.segOk.face) ||
+      (S.handsReq && !S.segOk.hands))) ? 0xffc85c : 0x7ce89a;
     ui.timer.text = `${S.timeLeft.toFixed(1)}s`;
     ui.timer.style.fill = S.timeLeft > 2 ? 0xffffff : 0xff6666;
     drawMeter(S.match, S.passThreshold ?? PASS_THRESHOLD);

@@ -29,6 +29,7 @@ from aiohttp import web, WSMsgType
 
 sys.path.insert(0, '/Users/edison.zhu/hand-control')
 from src.pose_detection.detector import PoseDetector
+from src.pose_detection.holistic import HolisticDetector
 from src.render.stickman import pose_from_body
 from src.utils.filters import OneEuroFilter
 from examples.hole_in_wall_game import (
@@ -66,7 +67,22 @@ WEB_POSES = POSES + [
     {'name': 'KICK RIGHT', 'angles': {'lu': 200, 'lf': 200, 'ru': 20, 'rf': 20},
      'legs': {'lt': -100, 'ls': -95, 'rt': -30, 'rs': -30}, 'needs_legs': True},
 ]
+WEB_POSES = WEB_POSES + [
+    {'name': 'T-POSE + SMILE', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'face': 'smile'},
+    {'name': 'ARMS UP + WOW', 'angles': {'lu': 135, 'lf': 135, 'ru': 45, 'rf': 45},
+     'face': 'wow'},
+    {'name': 'PEACE SIGNS', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
+     'hands': 'peace'},
+    {'name': 'FISTS UP', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
+     'hands': 'fist'},
+    {'name': 'HIGH FIVES', 'angles': {'lu': 155, 'lf': 100, 'ru': 25, 'rf': 80},
+     'hands': 'open'},
+    {'name': 'POINT + SMILE', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'hands': 'point', 'face': 'smile'},
+]
 LEG_POOL = [p for p in WEB_POSES if p.get('needs_legs')]
+FACE_HAND_POOL = [p for p in WEB_POSES if p.get('face') or p.get('hands')]
 
 
 def torso_angle(body):
@@ -198,6 +214,8 @@ class WebGame(HoleInWallGame):
         self._swapped = False
         self._last_px = 0.0
         self.px0 = 0.0
+        self._face = None
+        self._hands = None
 
     def note_legs(self, body, now):
         if legs_visible(body):
@@ -261,6 +279,30 @@ class WebGame(HoleInWallGame):
                 2 * np.pi * (now - self.state_t0) / self.SLIDE_PERIOD)
         return float(dx)
 
+    def note_face_hands(self, face, hands):
+        self._face = face          # {'smile','open'} or None
+        self._hands = hands        # {'l','r'} gestures or None
+
+    def face_hand_scores(self):
+        # (face_score, hands_score) for the current pose's requirements,
+        # or None per slot when the pose does not require it
+        fs = hs = None
+        req_face = self.pose.get('face') if self.pose else None
+        req_hands = self.pose.get('hands') if self.pose else None
+        if req_face:
+            f = self._face or {'smile': 0.0, 'open': 0.0}
+            fs = f['smile'] if req_face == 'smile' else f['open']
+        if req_hands:
+            g = self._hands or {'l': 'none', 'r': 'none'}
+            shown = [side for side in ('l', 'r') if g[side] != 'none']
+            if not shown:
+                hs = 0.0
+            else:
+                hs = sum(1.0 for s in shown if g[s] == req_hands) / len(shown)
+                if len(shown) == 1:
+                    hs *= 0.75   # one hidden hand can't score full marks
+        return fs, hs
+
     def note_px(self, body):
         # track horizontal shoulder-center position, normalized -1..1
         if (body is not None and body.get('l_shoulder_vis', 0) > 0.3 and
@@ -284,6 +326,18 @@ class WebGame(HoleInWallGame):
                 1.0 - max(err - self.POS_FREE, 0.0) / self.POS_FALLOFF, 0.0, 1.0))
             seg_ok['pos'] = err < self.POS_FREE + 20
             match = float((match * 4 + pos * 3) / 7)
+        fs, hs = self.face_hand_scores()
+        extra_scores, extra_w = 0.0, 0.0
+        if fs is not None:
+            seg_ok['face'] = fs >= 0.6
+            extra_scores += fs * 2
+            extra_w += 2
+        if hs is not None:
+            seg_ok['hands'] = hs >= 0.9
+            extra_scores += hs * 2
+            extra_w += 2
+        if extra_w:
+            match = float((match * 4 + extra_scores) / (4 + extra_w))
         return match, seg_ok
 
     def target_payload(self):
@@ -422,7 +476,7 @@ def capture_loop():
     and lets this loop reopen the device.
     """
     global RUNNING
-    pose_det = PoseDetector(confidence=0.5, model_complexity=1)
+    pose_det = HolisticDetector(confidence=0.5, model_complexity=1)
     game = WebGame(time.time())
     game.sounds.paths = {}          # browser plays the sounds instead
 
@@ -492,6 +546,9 @@ def _capture_session(pose_det, game):
                     body[name] = filters[name].apply(body[name])
                 game.note_legs(body, now)
                 game.note_px(body)
+                game.note_face_hands(
+                    pose_det.face_metrics(results, FRAME_W, FRAME_H),
+                    pose_det.hand_gestures(results, FRAME_W, FRAME_H, mirrored=True))
                 if game.pose is not None and game.state == 'WALL':
                     match, seg_ok = game.full_match(body, now)
             else:
@@ -569,6 +626,10 @@ def _capture_session(pose_det, game):
                              for p in game.players]
                             if game.two_p and len(game.players) == 2 else None),
                 'winner': game.winner,
+                'faceReq': game.pose.get('face') if game.pose else None,
+                'handsReq': game.pose.get('hands') if game.pose else None,
+                'faceLive': game._face,
+                'handsLive': game._hands,
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,
