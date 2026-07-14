@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from aiohttp import web, WSMsgType
 
-sys.path.insert(0, '/Users/edison.zhu/hand-control')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.pose_detection.detector import PoseDetector
 from src.pose_detection.tasks_detector import TasksDetector
 from src.render.stickman import pose_from_body

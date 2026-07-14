@@ -102,10 +102,40 @@ class TasksDetector(PoseDetector):
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         self._ts_ms += 33
 
-        self._detect_face(mp_img, frame.shape)
+        # Pose first: it tells us where the head is, so the face model can run
+        # on an upscaled head crop — at full-body distance the face is far too
+        # small for FaceLandmarker on the raw frame.
+        results = self.pose.process(rgb)
+        face_img, face_shape = self._head_crop(rgb, results)
+        self._detect_face(face_img, face_shape)
         self._detect_gestures(mp_img, frame.shape)
+        return results
 
-        return self.pose.process(rgb)
+    @staticmethod
+    def _head_crop(rgb, results, out_size=320):
+        """Upscaled crop around the head, or the full frame if no pose."""
+        import cv2
+        h, w = rgb.shape[:2]
+        full = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        if not results.pose_landmarks:
+            return full, rgb.shape
+        lms = results.pose_landmarks.landmark
+        nose, lsh, rsh = lms[0], lms[11], lms[12]
+        if nose.visibility < 0.3:
+            return full, rgb.shape
+        cx, cy = nose.x * w, nose.y * h
+        shoulder_w = abs(rsh.x - lsh.x) * w
+        half = max(60.0, shoulder_w * 0.85)
+        x0, x1 = int(max(0, cx - half)), int(min(w, cx + half))
+        y0, y1 = int(max(0, cy - half)), int(min(h, cy + half))
+        if x1 - x0 < 40 or y1 - y0 < 40:
+            return full, rgb.shape
+        crop = rgb[y0:y1, x0:x1]
+        if crop.shape[0] < out_size:
+            crop = cv2.resize(crop, (out_size, out_size),
+                              interpolation=cv2.INTER_LINEAR)
+        crop = np.ascontiguousarray(crop)
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=crop), crop.shape
 
     def _detect_face(self, mp_img, frame_shape):
         res = self.face_lm.detect_for_video(mp_img, self._ts_ms)

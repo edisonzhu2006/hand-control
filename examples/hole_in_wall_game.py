@@ -26,7 +26,7 @@ import time
 import cv2
 import numpy as np
 
-sys.path.insert(0, '/Users/edison.zhu/hand-control')
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
 from src.pose_detection.detector import PoseDetector
 from src.render.stickman import Stickman, pose_from_body, pose_from_angles
 from src.utils.filters import OneEuroFilter
