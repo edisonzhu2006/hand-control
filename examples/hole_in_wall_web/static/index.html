@@ -7,21 +7,26 @@
 <style>
   html, body { margin: 0; height: 100%; background: #0a0a14; overflow: hidden;
                display: flex; align-items: center; justify-content: center; }
-  #wrap { position: relative; }
-  canvas { display: block; border-radius: 8px; }
-  #pip { position: absolute; top: 12px; right: 12px; width: 208px; height: 117px;
-         border: 1px solid rgba(255,255,255,.25); border-radius: 10px; z-index: 5;
-         background: #000; box-shadow: 0 6px 22px rgba(0,0,0,.55); }
-  #piplabel { position: absolute; top: 134px; right: 16px; color: #8b8b96;
-              font: 11px Rubik, sans-serif; z-index: 5; }
-  #hint { position: absolute; bottom: 6px; left: 12px; color: #667;
-          font: 12px Rubik, sans-serif; z-index: 5; }
+  /* fill the window (16:9 letterboxed), canvas scales up crisply */
+  #wrap { position: relative; width: min(98vw, calc(96vh * 16 / 9)); }
+  canvas { display: block; border-radius: 10px;
+           width: 100% !important; height: auto !important; }
+  #pipbox { position: absolute; top: 1.6%; right: 1.2%; width: 21.7%; z-index: 5; }
+  #pip { display: block; width: 100%; border: 1px solid rgba(255,255,255,.25);
+         border-radius: 10px; background: #000;
+         box-shadow: 0 6px 22px rgba(0,0,0,.55); }
+  #piplabel { color: #8b8b96; font: 600 11px Rubik, sans-serif; text-align: right;
+              margin-top: 3px; }
+  #hint { position: absolute; bottom: 1.2%; left: 1.4%; color: #667;
+          font: 600 12px Rubik, sans-serif; z-index: 5; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <img id="pip" alt="">
-  <div id="piplabel">camera</div>
+  <div id="pipbox">
+    <img id="pip" alt="">
+    <div id="piplabel">camera</div>
+  </div>
   <div id="hint">click once for sound &nbsp;|&nbsp; SPACE start &nbsp;|&nbsp; D daily &nbsp;|&nbsp; S skip &nbsp;|&nbsp; M mute &nbsp;|&nbsp; C score card</div>
 </div>
 <script src="/static/vendor/pixi-legacy.min.js"></script>

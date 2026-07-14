@@ -151,6 +151,13 @@ class WebGame(HoleInWallGame):
         self._hold = 0.0
         self._last_t = now
         self.last_gain = None
+        self.wall_dx = 0.0
+        self.slide_amp = 0.0
+        self.tight = False
+        self.fake_pose = None
+        self._swapped = False
+        self._last_px = 0.0
+        self.px0 = 0.0
 
     def note_legs(self, body, now):
         if legs_visible(body):
@@ -162,6 +169,10 @@ class WebGame(HoleInWallGame):
         if now > self.legs_ok_until:
             pool = [p for p in pool if not p.get('needs_legs')]
         return pool
+
+    SLIDE_PERIOD = 3.6      # s per sway cycle for sliding holes
+    POS_FREE = 50.0         # px of free positional slack
+    POS_FALLOFF = 90.0      # px beyond slack where position score hits 0
 
     def new_wall(self, now):
         pool = self._pool(now)
@@ -176,6 +187,62 @@ class WebGame(HoleInWallGame):
         self.state_t0 = now
         self._recent = []
         self._hold = 0.0
+
+        # wall modifiers (rolled from the seeded rng so daily stays shared)
+        lvl = self.level
+        self.wall_dx = 0.0
+        self.slide_amp = 0.0
+        self.tight = False
+        self.fake_pose = None
+        self._swapped = False
+        self.px0 = self._last_px    # where the player stands now = neutral
+        if lvl >= 2 and self._rng.rand() < 0.40:
+            self.wall_dx = float(self._rng.choice([-1, 1]) *
+                                 self._rng.uniform(80, 150))
+        if lvl >= 3 and self._rng.rand() < 0.30:
+            self.slide_amp = float(self._rng.uniform(50, 100))
+        if lvl >= 2 and self._rng.rand() < 0.15:
+            self.tight = True
+        if lvl >= 3 and self._rng.rand() < 0.25:
+            others = [p for p in pool if p is not self.pose]
+            self.fake_pose = others[int(self._rng.rand() * len(others))]
+
+    @property
+    def pass_threshold(self):
+        return 0.85 if self.tight else PASS_THRESHOLD
+
+    def hole_dx(self, now):
+        # current horizontal hole offset (sliding holes sway over time)
+        dx = getattr(self, 'wall_dx', 0.0)
+        if getattr(self, 'slide_amp', 0.0):
+            dx += self.slide_amp * np.sin(
+                2 * np.pi * (now - self.state_t0) / self.SLIDE_PERIOD)
+        return float(dx)
+
+    def note_px(self, body):
+        # track horizontal shoulder-center position, normalized -1..1
+        if (body is not None and body.get('l_shoulder_vis', 0) > 0.3 and
+                body.get('r_shoulder_vis', 0) > 0.3):
+            shc = (body['l_shoulder'][0] + body['r_shoulder'][0]) / 2
+            self._last_px = float(shc / FRAME_W * 2 - 1)
+        return self._last_px
+
+    def avatar_x(self):
+        # arena offset from stepping sideways, relative to the wall-start spot
+        return float(np.clip((self._last_px - self.px0) * 260, -210, 210))
+
+    def full_match(self, body, now):
+        # pose match blended with positional alignment for offset holes
+        match, seg_ok = match_pose_ex(body, self.pose)
+        if match is None:
+            return None, seg_ok
+        if self.wall_dx or self.slide_amp:
+            err = abs(self.avatar_x() - self.hole_dx(now))
+            pos = float(np.clip(
+                1.0 - max(err - self.POS_FREE, 0.0) / self.POS_FALLOFF, 0.0, 1.0))
+            seg_ok['pos'] = err < self.POS_FREE + 20
+            match = float((match * 4 + pos * 3) / 7)
+        return match, seg_ok
 
     def target_payload(self):
         if self.pose is None:
@@ -195,9 +262,17 @@ class WebGame(HoleInWallGame):
             return None
 
         if self.state == 'WALL':
+            # fake-out: the hole swaps to a different pose at half-way
+            if (self.fake_pose is not None and not self._swapped and
+                    self.progress(now) >= 0.5):
+                self.pose = self.fake_pose
+                self._swapped = True
+                self._recent = []
+                self._hold = 0.0
+                return 'fakeout'
             if match is not None:
                 self._recent.append((now, match))
-                if match >= PASS_THRESHOLD:
+                if match >= self.pass_threshold:
                     self._hold += dt   # reward locking the pose early
             self._recent = [(t, m) for t, m in self._recent
                             if now - t <= GRACE_WINDOW]
@@ -205,12 +280,14 @@ class WebGame(HoleInWallGame):
                 return None
             if self._recent:
                 match = max(m for _, m in self._recent)
-            if match is not None and match >= PASS_THRESHOLD:
+            if match is not None and match >= self.pass_threshold:
                 self.walls_passed += 1
                 self.streak += 1
                 perfect = match >= PERFECT_MATCH
                 bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
                 points = 100 * self.multiplier + (50 if perfect else 0) + bonus
+                if self.tight:
+                    points *= 2
                 self.score += points
                 self.round_time = max(ROUND_TIME_MIN,
                                       self.round_time - ROUND_TIME_STEP)
@@ -339,8 +416,9 @@ def _capture_session(pose_det, game):
                 for name in PoseDetector.BODY:
                     body[name] = filters[name].apply(body[name])
                 game.note_legs(body, now)
+                game.note_px(body)
                 if game.pose is not None and game.state == 'WALL':
-                    match, seg_ok = match_pose_ex(body, game.pose)
+                    match, seg_ok = game.full_match(body, now)
             else:
                 for f in filters.values():
                     f.reset()
@@ -405,6 +483,10 @@ def _capture_session(pose_det, game):
                              if game.daily_date else 0,
                 'lastGain': game.last_gain,
                 'holdT': round(getattr(game, '_hold', 0.0), 2),
+                'ax': round(game.avatar_x(), 1),
+                'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
+                'passThreshold': game.pass_threshold,
+                'tight': game.tight,
                 'pip': pip_b64,
             }
             with LOCK:

@@ -29,6 +29,8 @@ const COL = {
 const app = new PIXI.Application({
   width: W, height: H, antialias: true, background: 0x121218,
   preserveDrawingBuffer: true,   // makes the WebGL canvas screenshot-able
+  resolution: Math.min(window.devicePixelRatio || 1, 2),   // crisp when CSS-scaled up
+  autoDensity: true,
 });
 document.getElementById('wrap').prepend(app.view);
 
@@ -57,75 +59,116 @@ try {
 /* -------------------------------------------------------------- background */
 
 function buildBackground() {
-  // Painted backdrop on a 2D canvas (real gradients beat banded fills), then
-  // a Graphics layer for the grid lines.
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d');
   const horizon = H * 0.52;
 
+  // deep studio sky
   const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-  sky.addColorStop(0, '#101018');
-  sky.addColorStop(0.75, '#1e2030');
-  sky.addColorStop(1, '#2a2c40');
+  sky.addColorStop(0, '#0d0d16');
+  sky.addColorStop(0.7, '#1b1d30');
+  sky.addColorStop(1, '#2c2e48');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, horizon);
 
-  // warm stage glow behind the avatar (dimmer core so the hole doesn't go muddy)
-  const glow = ctx.createRadialGradient(W / 2, ANCHOR.y + 80, 40, W / 2, ANCHOR.y + 80, 340);
-  glow.addColorStop(0, 'rgba(226,203,158,0.16)');
+  // warm stage glow behind the avatar
+  const glow = ctx.createRadialGradient(W / 2, ANCHOR.y + 80, 40, W / 2, ANCHOR.y + 80, 360);
+  glow.addColorStop(0, 'rgba(228,206,160,0.17)');
   glow.addColorStop(0.5, 'rgba(214,186,140,0.08)');
   glow.addColorStop(1, 'rgba(200,170,120,0)');
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, W, H);
 
-  // light cones from the rig
-  for (const [x0, tilt] of [[W * 0.16, 0.16], [W * 0.84, -0.16]]) {
-    const cone = ctx.createLinearGradient(x0, 0, x0, H * 0.95);
-    cone.addColorStop(0, 'rgba(235,222,190,0.10)');
-    cone.addColorStop(1, 'rgba(235,222,190,0)');
+  // lighting truss with three fixtures + visible cones
+  ctx.fillStyle = '#08080d';
+  ctx.fillRect(0, 16, W, 7);
+  for (const fx of [W * 0.18, W * 0.5, W * 0.82]) {
+    ctx.fillStyle = '#0a0a10';
+    ctx.fillRect(fx - 12, 20, 24, 20);
+    ctx.fillStyle = '#ffd98c';
+    ctx.beginPath(); ctx.arc(fx, 42, 5, 0, 7); ctx.fill();
+    const cone = ctx.createLinearGradient(fx, 40, fx, H * 0.92);
+    cone.addColorStop(0, 'rgba(240,224,185,0.13)');
+    cone.addColorStop(1, 'rgba(240,224,185,0)');
     ctx.fillStyle = cone;
     ctx.beginPath();
-    ctx.moveTo(x0 - 14, -4);
-    ctx.lineTo(x0 + 14, -4);
-    ctx.lineTo(x0 + tilt * H + 120, H * 0.95);
-    ctx.lineTo(x0 + tilt * H - 120, H * 0.95);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(fx - 8, 44); ctx.lineTo(fx + 8, 44);
+    ctx.lineTo(fx + (fx < W / 2 ? 150 : fx > W / 2 ? -150 : 0) + 130, H * 0.92);
+    ctx.lineTo(fx + (fx < W / 2 ? 150 : fx > W / 2 ? -150 : 0) - 130, H * 0.92);
+    ctx.closePath(); ctx.fill();
   }
 
+  // crowd bleachers flanking the stage (silhouette rows of heads)
+  for (const side of [0, 1]) {
+    const xa = side === 0 ? 0 : W * 0.72;
+    for (let row = 0; row < 3; row++) {
+      const y = horizon - 14 - row * 22;
+      ctx.fillStyle = `rgba(7,8,12,${0.95 - row * 0.12})`;
+      ctx.fillRect(xa, y + 8, W * 0.28, 22);
+      for (let x = xa + 8 + (row % 2) * 10; x < xa + W * 0.28 - 6; x += 21) {
+        ctx.beginPath();
+        ctx.arc(x, y + 8, 8 + (Math.random() * 2 | 0), Math.PI, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  }
+
+  // LED strip along the horizon
+  const led = ctx.createLinearGradient(0, horizon - 3, 0, horizon + 5);
+  led.addColorStop(0, 'rgba(122,214,255,0.0)');
+  led.addColorStop(0.5, 'rgba(122,214,255,0.5)');
+  led.addColorStop(1, 'rgba(122,214,255,0.0)');
+  ctx.fillStyle = led;
+  ctx.fillRect(0, horizon - 4, W, 9);
+
+  // floor
   const floor = ctx.createLinearGradient(0, horizon, 0, H);
-  floor.addColorStop(0, '#232830');
-  floor.addColorStop(1, '#0c0e12');
+  floor.addColorStop(0, '#262b34');
+  floor.addColorStop(1, '#0b0d11');
   ctx.fillStyle = floor;
   ctx.fillRect(0, horizon, W, H - horizon);
 
-  // spotlight pool under the avatar
-  const pool = ctx.createRadialGradient(W / 2, H * 0.9, 20, W / 2, H * 0.9, 260);
-  pool.addColorStop(0, 'rgba(245,233,208,0.16)');
+  // stage platform under the avatar
+  ctx.fillStyle = 'rgba(10,11,16,0.55)';
+  ctx.beginPath(); ctx.ellipse(W / 2, H * 0.86, 300, 52, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(122,214,255,0.22)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(W / 2, H * 0.86, 300, 52, 0, 0, 7); ctx.stroke();
+  ctx.strokeStyle = 'rgba(122,214,255,0.10)';
+  ctx.beginPath(); ctx.ellipse(W / 2, H * 0.86, 262, 43, 0, 0, 7); ctx.stroke();
+
+  // spotlight pool + soft vertical reflection streak
+  const pool = ctx.createRadialGradient(W / 2, H * 0.87, 20, W / 2, H * 0.87, 250);
+  pool.addColorStop(0, 'rgba(245,233,208,0.20)');
   pool.addColorStop(1, 'rgba(245,233,208,0)');
   ctx.fillStyle = pool;
   ctx.fillRect(0, horizon, W, H - horizon);
+  const refl = ctx.createLinearGradient(0, horizon, 0, H);
+  refl.addColorStop(0, 'rgba(228,206,160,0.10)');
+  refl.addColorStop(1, 'rgba(228,206,160,0)');
+  ctx.fillStyle = refl;
+  ctx.fillRect(W / 2 - 90, horizon, 180, H - horizon);
 
   // dust motes
-  for (let i = 0; i < 30; i++) {
-    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.2 + 0.04})`;
+  for (let i = 0; i < 26; i++) {
+    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.18 + 0.04})`;
     ctx.beginPath();
-    ctx.arc(Math.random() * W, Math.random() * horizon * 0.85,
+    ctx.arc(Math.random() * W, 30 + Math.random() * (horizon - 60),
       Math.random() * 1.2 + 0.3, 0, 7);
     ctx.fill();
   }
   bgLayer.addChild(new PIXI.Sprite(PIXI.Texture.from(cv)));
 
-  // whisper-quiet perspective grid
+  // quiet perspective grid on the floor only
   const g = new PIXI.Graphics();
-  g.lineStyle(1, 0x3a4450, 0.28);
+  g.lineStyle(1, 0x39424e, 0.22);
   for (let x = -W; x <= 2 * W; x += W / 6) {
     g.moveTo(x, H).lineTo(W / 2, horizon);
   }
   for (let i = 1; i <= 6; i++) {
     const y = horizon + (H - horizon) * Math.pow(i / 6, 1.8);
-    g.lineStyle(1, 0x3a4450, 0.12 + 0.2 * (i / 6));
+    g.lineStyle(1, 0x39424e, 0.10 + 0.16 * (i / 6));
     g.moveTo(0, y).lineTo(W, y);
   }
   bgLayer.addChild(g);
@@ -462,16 +505,16 @@ function drawHearts(lives) {
   }
 }
 
-function drawMeter(match) {
+function drawMeter(match, threshold = PASS_THRESHOLD) {
   const g = ui.meterG;
   g.clear();
   if (match == null) return;
   const x0 = 200, x1 = W - 200, y = H - 30, h = 10;
   const w = (x1 - x0) * Math.max(0, Math.min(1, match));
-  const fit = match >= PASS_THRESHOLD;
+  const fit = match >= threshold;
   g.beginFill(0xffffff, 0.12).drawRoundedRect(x0, y, x1 - x0, h, 5).endFill();
   g.beginFill(fit ? 0x52dc78 : 0xe8a13c, 0.95).drawRoundedRect(x0, y, w, h, 5).endFill();
-  const px = x0 + (x1 - x0) * PASS_THRESHOLD;
+  const px = x0 + (x1 - x0) * threshold;
   g.lineStyle(2, 0xffffff, 0.9).moveTo(px, y - 5).lineTo(px, y + h + 5).lineStyle(0);
 }
 
@@ -538,6 +581,8 @@ function popup(text, x, y, color) {
 
 const AC = window.AudioContext || window.webkitAudioContext;
 const audio = AC ? new AC() : null;
+const master = audio ? audio.createGain() : null;
+if (master) { master.gain.value = 0.75; master.connect(audio.destination); }
 document.addEventListener('click', () => audio && audio.resume(), { once: true });
 
 function beep(freq, dur = 0.1, type = 'square', gain = 0.08, when = 0) {
@@ -545,22 +590,23 @@ function beep(freq, dur = 0.1, type = 'square', gain = 0.08, when = 0) {
   const t0 = audio.currentTime + when;
   const o = audio.createOscillator(), g = audio.createGain();
   o.type = type; o.frequency.value = freq;
-  g.gain.setValueAtTime(gain, t0);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.linearRampToValueAtTime(gain, t0 + 0.008);   // soft attack, no click
   g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-  o.connect(g).connect(audio.destination);
-  o.start(t0); o.stop(t0 + dur + 0.02);
+  o.connect(g).connect(master);
+  o.start(t0); o.stop(t0 + dur + 0.03);
 }
 
-function noiseBurst(dur = 0.25, gain = 0.15) {
+function noiseBurst(dur = 0.25, gain = 0.15, when = 0) {
   if (!audio || audio.state !== 'running' || !audioOn) return;
-  const n = audio.sampleRate * dur;
+  const n = Math.floor(audio.sampleRate * dur);
   const buf = audio.createBuffer(1, n, audio.sampleRate);
   const d = buf.getChannelData(0);
   for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
   const src = audio.createBufferSource(), g = audio.createGain();
   src.buffer = buf; g.gain.value = gain;
-  src.connect(g).connect(audio.destination);
-  src.start();
+  src.connect(g).connect(master);
+  src.start(audio.currentTime + when);
 }
 
 let audioOn = true;
@@ -574,12 +620,10 @@ const music = {
     while (this.next < audio.currentTime + 0.15) {
       const when = this.next - audio.currentTime;
       const b = this.beat % 8;
-      if (b % 2 === 0) beep(55, 0.1, 'sine', 0.11, when);                  // kick
-      beep(6800, 0.018, 'square', b % 2 ? 0.016 : 0.009, when);            // hat
-      if (b % 2 === 1) {
-        const bass = [0, 0, 3, 5][(this.beat >> 1) % 4];
-        beep(110 * Math.pow(2, bass / 12), 0.14, 'triangle', 0.05, when);  // bass
-      }
+      if (b % 2 === 0) beep(98, 0.13, 'sine', 0.09, when);                 // kick (audible on laptops)
+      if (b % 2 === 1) noiseBurst(0.03, 0.018, when);                      // soft brushed hat
+      const bass = [0, 0, 3, 5, 0, 0, 7, 5][b];
+      beep(110 * Math.pow(2, bass / 12), 0.16, 'triangle', 0.045, when);   // warm bass
       this.next += 60 / this.bpm / 2;
       this.beat++;
     }
@@ -597,6 +641,7 @@ function say(text) {
 }
 
 const SFX = {
+  fakeout: () => { beep(880, 0.09, 'square', 0.09); beep(587, 0.16, 'square', 0.09, 0.1); },
   tick: () => beep(660, 0.07, 'square', 0.06),
   go: () => { beep(880, 0.12); beep(1320, 0.15, 'square', 0.07, 0.1); },
   pass: () => { beep(523, 0.09); beep(659, 0.09, 'square', 0.08, 0.08); beep(784, 0.16, 'square', 0.08, 0.16); },
@@ -630,6 +675,10 @@ function connect() {
         if (ev === 'perfect') { confetti(); say('perfect!'); }
       }
       if (ev === 'gameover') say('game over');
+      if (ev === 'fakeout') {
+        popup('FAKE-OUT!', W / 2, 250, 0xffc85c);
+        shake = 0.35;
+      }
     }
     if (S.pip) pip.src = 'data:image/jpeg;base64,' + S.pip;
   };
@@ -687,6 +736,8 @@ let smoothScale = 0.22;
 let lastBig = '';
 let bigPop = 1;
 let lastPoseName = '';
+let axSmooth = 0;
+let holeDxSmooth = 0;
 
 app.ticker.add((dt) => {
   const dts = dt / 60;
@@ -714,20 +765,24 @@ app.ticker.add((dt) => {
   }
   if (S.state === 'MENU') lastPoseName = '';
 
-  // avatar breathes
+  // avatar breathes and steps sideways with the player
   const breath = Math.sin(performance.now() / 640) * 2.2;
+  axSmooth += ((S.ax || 0) - axSmooth) * Math.min(1, dts * 12);
+  holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
-    { x: ANCHOR.x, y: ANCHOR.y + breath });
+    { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath });
 
-  // wall
+  // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
   if (S.state === 'WALL') {
     ensureWall(S);
     const target = 0.22 + 0.78 * Math.pow(S.progress, 2.2);
     smoothScale += (target - smoothScale) * Math.min(1, dts * 14);
     wallSprite.scale.set(smoothScale);
-    wallSprite.tint = (S.match ?? 0) >= PASS_THRESHOLD ? 0xccffcc : 0xffffff;
+    wallSprite.position.x = W / 2 + holeDxSmooth * smoothScale;
+    const fit = (S.match ?? 0) >= (S.passThreshold ?? PASS_THRESHOLD);
+    wallSprite.tint = fit ? 0xccffcc : (S.tight ? 0xffe9b8 : 0xffffff);
     (smoothScale < 0.9 ? wallBehind : wallFront).addChild(wallSprite);
   } else if (S.state === 'RESULT' && S.outcome === 'pass' && wallSprite) {
     // brief impact hold (slow-mo beat), then accelerate through the hole
@@ -784,15 +839,22 @@ app.ticker.add((dt) => {
   }
 
   if (S.state === 'WALL') {
-    ui.poseName.text = S.poseName;
+    ui.poseName.text = S.poseName + (S.tight ? '  -  TIGHT x2!' : '');
     ui.timer.text = `${S.timeLeft.toFixed(1)}s`;
     ui.timer.style.fill = S.timeLeft > 2 ? 0xffffff : 0xff6666;
-    drawMeter(S.match);
+    drawMeter(S.match, S.passThreshold ?? PASS_THRESHOLD);
     drawChip(S.targetAngles);
     if (!S.tracked) ui.sub.text = 'Step back so the camera sees both your arms';
     else if (S.match == null) ui.sub.text = 'Move back a bit - both arms need to be in view';
-    if ((S.match ?? 0) >= PASS_THRESHOLD && S.holdT > 0.15) {
+    if ((S.match ?? 0) >= (S.passThreshold ?? PASS_THRESHOLD) && S.holdT > 0.15) {
       lockText.text = `LOCKED  +${Math.floor(Math.min(S.holdT, 2) * 30)}`;
+    }
+    const stepErr = (S.holeDx || 0) - (S.ax || 0);
+    if (S.segOk && S.segOk.pos === false && Math.abs(stepErr) > 55) {
+      lockText.text = stepErr > 0 ? 'STEP RIGHT  -->' : '<--  STEP LEFT';
+      lockText.style.fill = 0xffc85c;
+    } else {
+      lockText.style.fill = 0x7ce89a;
     }
   } else if (S.state === 'COUNTDOWN') {
     ui.big.text = S.countdown > 0 ? String(S.countdown) : 'GO!';
