@@ -33,3 +33,4 @@ Thumbs.db
 .coverage
 data/hole_in_wall_highscore.json
 .gstack/
+data/models/*.task

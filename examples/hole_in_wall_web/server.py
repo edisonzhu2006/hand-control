@@ -29,7 +29,7 @@ from aiohttp import web, WSMsgType
 
 sys.path.insert(0, '/Users/edison.zhu/hand-control')
 from src.pose_detection.detector import PoseDetector
-from src.pose_detection.holistic import HolisticDetector
+from src.pose_detection.tasks_detector import TasksDetector
 from src.render.stickman import pose_from_body
 from src.utils.filters import OneEuroFilter
 from examples.hole_in_wall_game import (
@@ -476,7 +476,7 @@ def capture_loop():
     and lets this loop reopen the device.
     """
     global RUNNING
-    pose_det = HolisticDetector(confidence=0.5, model_complexity=1)
+    pose_det = TasksDetector(confidence=0.5, model_complexity=1)
     game = WebGame(time.time())
     game.sounds.paths = {}          # browser plays the sounds instead
 
