@@ -366,48 +366,67 @@ class HoleInWallGame:
                 return None
             if self._recent:
                 match = max(m for _, m in self._recent)
-            if match is not None and match >= PASS_THRESHOLD:
-                self.walls_passed += 1
-                self.streak += 1
-                points = 100 * self.multiplier
-                perfect = match >= PERFECT_MATCH
-                if perfect:
-                    points += 50
-                self.score += points
-                self.round_time = max(ROUND_TIME_MIN, self.round_time - ROUND_TIME_STEP)
-                self.result = ('pass', match)
-                self.sounds.play('perfect' if perfect else 'pass')
-                self.popups.append(
-                    (f'+{points}' + (' PERFECT!' if perfect else ''),
-                     AVATAR_ANCHOR[0] - 70, AVATAR_ANCHOR[1] - 90,
-                     (80, 230, 120), now))
-                outcome = 'pass'
+            if match is not None and match >= self.pass_threshold:
+                outcome = self._on_pass(match, now)
             else:
-                self.lives -= 1
-                self.streak = 0
-                self.result = ('crash', match or 0.0)
-                self.sounds.play('crash')
-                self.particles.burst(np.array(AVATAR_ANCHOR, float) + [0, 60])
-                outcome = 'crash'
+                outcome = self._on_crash(match, now)
             self.state = 'RESULT'
             self.state_t0 = now
             return outcome
 
         if self.state == 'RESULT':
             if now - self.state_t0 >= RESULT_SECS:
-                if self.lives <= 0:
-                    self.state = 'GAME_OVER'
-                    self.state_t0 = now
-                    self.new_record = self.score > self.high_score
-                    if self.new_record:
-                        self.high_score = self.score
-                        self._save_high_score()
-                    self.sounds.play('gameover')
-                else:
-                    self.new_wall(now)
+                return self._advance_after_result(now)
             return None
 
         return None
+
+    # -- extension hooks: subclasses tune scoring/flow without copying update()
+
+    @property
+    def pass_threshold(self):
+        return PASS_THRESHOLD
+
+    def compute_points(self, match, perfect):
+        return 100 * self.multiplier + (50 if perfect else 0)
+
+    def _on_pass(self, match, now):
+        self.walls_passed += 1
+        self.streak += 1
+        perfect = match >= PERFECT_MATCH
+        points = self.compute_points(match, perfect)
+        self.score += points
+        self.round_time = max(ROUND_TIME_MIN, self.round_time - ROUND_TIME_STEP)
+        self.result = ('pass', match)
+        self.sounds.play('perfect' if perfect else 'pass')
+        self.popups.append(
+            (f'+{points}' + (' PERFECT!' if perfect else ''),
+             AVATAR_ANCHOR[0] - 70, AVATAR_ANCHOR[1] - 90,
+             (80, 230, 120), now))
+        return 'perfect' if perfect else 'pass'
+
+    def _on_crash(self, match, now):
+        self.lives -= 1
+        self.streak = 0
+        self.result = ('crash', match or 0.0)
+        self.sounds.play('crash')
+        self.particles.burst(np.array(AVATAR_ANCHOR, float) + [0, 60])
+        return 'crash'
+
+    def _advance_after_result(self, now):
+        if self.lives <= 0:
+            self._finish_game(now)
+        else:
+            self.new_wall(now)
+
+    def _finish_game(self, now):
+        self.state = 'GAME_OVER'
+        self.state_t0 = now
+        self.new_record = self.score > self.high_score
+        if self.new_record:
+            self.high_score = self.score
+            self._save_high_score()
+        self.sounds.play('gameover')
 
 
 # --------------------------------------------------------------- rendering

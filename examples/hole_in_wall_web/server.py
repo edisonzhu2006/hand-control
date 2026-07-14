@@ -383,11 +383,42 @@ class WebGame(HoleInWallGame):
             t['legs'] = self.pose['legs']
         return t
 
+    def compute_points(self, match, perfect):
+        bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
+        points = 100 * self.multiplier + (50 if perfect else 0) + bonus
+        if self.tight:
+            points *= 2
+        self.last_gain = {'points': points, 'perfect': perfect, 'bonus': bonus}
+        return points
+
+    def _on_pass(self, match, now):
+        outcome = super()._on_pass(match, now)
+        self.popups.clear()          # the browser draws its own popups
+        if self.two_p:
+            self._stash_player()
+        return outcome
+
+    def _on_crash(self, match, now):
+        outcome = super()._on_crash(match, now)
+        if self.two_p:
+            self._stash_player()
+        return outcome
+
+    def _advance_after_result(self, now):
+        if self.two_p:
+            return self._advance_two_p(now)
+        return super()._advance_after_result(now)
+
     def update(self, match, now):
         dt = min(now - self._last_t, 0.2)
         self._last_t = now
 
         if self.state == 'MENU':
+            return None
+
+        if self.state == 'HANDOFF':
+            if now - self.state_t0 >= self.HANDOFF_SECS:
+                self.new_wall(now)
             return None
 
         if self.state == 'WALL':
@@ -399,62 +430,10 @@ class WebGame(HoleInWallGame):
                 self._recent = []
                 self._hold = 0.0
                 return 'fakeout'
-            if match is not None:
-                self._recent.append((now, match))
-                if match >= self.pass_threshold:
-                    self._hold += dt   # reward locking the pose early
-            self._recent = [(t, m) for t, m in self._recent
-                            if now - t <= GRACE_WINDOW]
-            if self.time_left(now) > 0:
-                return None
-            if self._recent:
-                match = max(m for _, m in self._recent)
             if match is not None and match >= self.pass_threshold:
-                self.walls_passed += 1
-                self.streak += 1
-                perfect = match >= PERFECT_MATCH
-                bonus = int(min(self._hold, 2.0) * 30)   # up to +60 for holding
-                points = 100 * self.multiplier + (50 if perfect else 0) + bonus
-                if self.tight:
-                    points *= 2
-                self.score += points
-                self.round_time = max(ROUND_TIME_MIN,
-                                      self.round_time - ROUND_TIME_STEP)
-                self.result = ('pass', match)
-                self.last_gain = {'points': points, 'perfect': perfect,
-                                  'bonus': bonus}
-                if self.two_p:
-                    self._stash_player()
-                outcome = 'perfect' if perfect else 'pass'
-            else:
-                self.lives -= 1
-                self.streak = 0
-                self.result = ('crash', match or 0.0)
-                if self.two_p:
-                    self._stash_player()
-                outcome = 'crash'
-            self.state = 'RESULT'
-            self.state_t0 = now
-            return outcome
+                self._hold += dt   # reward locking the pose early
 
-        if self.state == 'RESULT':
-            if now - self.state_t0 >= RESULT_SECS:
-                if self.two_p:
-                    return self._advance_two_p(now)
-                if self.lives <= 0:
-                    self._finish_game(now)
-                else:
-                    self.new_wall(now)
-            return None
-
-        if self.state == 'HANDOFF':
-            if now - self.state_t0 >= self.HANDOFF_SECS:
-                self.new_wall(now)
-            return None
-
-        if self.state == 'COUNTDOWN':
-            return super().update(match, now)
-        return None
+        return super().update(match, now)
 
     def _advance_two_p(self, now):
         self._stash_player()
@@ -492,21 +471,10 @@ class WebGame(HoleInWallGame):
             self._save_high_score()
 
     def _finish_game(self, now):
-        self.state = 'GAME_OVER'
-        self.state_t0 = now
-        self.new_record = self.score > self.high_score
-        if self.new_record:
-            self.high_score = self.score
-        if self.mode == 'daily':
+        if self.mode == 'daily' and self.daily_date:
             prev = self.daily_scores.get(self.daily_date, 0)
             self.daily_scores[self.daily_date] = max(prev, self.score)
-        self._save_high_score()
-
-LOCK = threading.Lock()
-CLIENTS = set()        # connected websockets (shared with the capture thread)
-LATEST = None          # most recent payload dict (with accumulated events)
-FLAGS = set()          # input flags from the browser: 'restart', 'skip'
-RUNNING = True
+        super()._finish_game(now)
 
 
 def payload_pose(pose):
