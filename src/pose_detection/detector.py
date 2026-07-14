@@ -149,8 +149,9 @@ class PoseDetector:
                 elif name.startswith('r_'):
                     name = 'l_' + name[2:]
             lm = lms[idx]
-            x = -lm.x if mirrored else lm.x
-            body[name] = np.array([x, lm.y, lm.z], dtype=float)
+            # detection ran on the already-flipped frame, so world x is
+            # screen-consistent — only the anatomical labels need swapping
+            body[name] = np.array([lm.x, lm.y, lm.z], dtype=float)
         return body
 
     def draw(self, frame, results):

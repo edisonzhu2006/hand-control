@@ -11,6 +11,9 @@
   #wrap { position: relative; width: min(98vw, calc(96vh * 16 / 9)); }
   canvas { display: block; border-radius: 10px;
            width: 100% !important; height: auto !important; }
+  #three { position: absolute; top: 0; left: 0; z-index: 1;
+           width: 100% !important; height: auto !important; border-radius: 10px; }
+  #wrap > canvas:not(#three) { position: relative; z-index: 2; }
   #pipbox { position: absolute; top: 1.6%; right: 1.2%; width: 21.7%; z-index: 5; }
   #pip { display: block; width: 100%; border: 1px solid rgba(255,255,255,.25);
          border-radius: 10px; background: #000;
@@ -29,8 +32,10 @@
   </div>
   <div id="hint">SPACE start &nbsp;|&nbsp; D daily &nbsp;|&nbsp; T 2-player &nbsp;|&nbsp; L leg mode &nbsp;|&nbsp; S skip &nbsp;|&nbsp; M mute &nbsp;|&nbsp; C score card</div>
 </div>
+<script src="/static/vendor/three.min.js"></script>
 <script src="/static/vendor/pixi-legacy.min.js"></script>
 <script src="/static/vendor/pixi-filters.min.js"></script>
+<script src="/static/three_scene.js"></script>
 <script src="/static/game.js"></script>
 </body>
 </html>

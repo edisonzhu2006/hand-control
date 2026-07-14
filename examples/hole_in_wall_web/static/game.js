@@ -50,6 +50,19 @@ const vignetteLayer = new PIXI.Container();
 const uiLayer = new PIXI.Container();
 root.addChild(bgLayer, wallBehind, avatarG, wallFront, fxG, vignetteLayer, uiLayer);
 
+// True-3D renderer: Three.js canvas under a transparent Pixi HUD. Classic
+// 2.5D stays as automatic fallback (or force it with ?classic).
+let use3d = false;
+if (typeof T3 !== 'undefined' && T3 && !location.search.includes('classic')) {
+  use3d = T3.init(W, H);
+  if (use3d) {
+    T3.canvas.id = 'three';
+    document.getElementById('wrap').prepend(T3.canvas);
+    app.renderer.background.alpha = 0;
+    bgLayer.visible = false;
+  }
+}
+
 try {
   if (app.renderer.type === PIXI.RENDERER_TYPE.WEBGL) {
     root.filters = [new PIXI.filters.AdvancedBloomFilter({
@@ -967,7 +980,8 @@ app.ticker.add((dt) => {
 
   // avatar breathes, steps sideways, and moves in depth with the player
   const depthScale = Math.max(0.7, Math.min(1.4, 1 + (S.depthDelta || 0) * 0.9));
-  avatarG.scale.set(depthScale);
+  avatarG.scale.set(use3d ? 0.0001 : depthScale);
+  avatarG.visible = !use3d;
   const breath = Math.sin(performance.now() / 640) * 2.2;
   axSmooth += ((S.ax || 0) - axSmooth) * Math.min(1, dts * 12);
   holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
@@ -976,9 +990,19 @@ app.ticker.add((dt) => {
     { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
     { face: S.faceLive, shapes: S.handShapes, p3: S.pose3d });
 
+  // 3D scene drives its own avatar + wall
+  if (use3d) {
+    if (S.state === 'WALL' && S.targetAngles && wallForPose !== S.poseName) {
+      T3.setWallTexture(buildWallTexture(S.targetAngles));
+      wallForPose = S.poseName;
+    }
+    T3.drawFaceTexture(S.faceLive, { face: S.faceLive });
+    T3.update(S, { p3: S.pose3d, face: S.faceLive }, axSmooth, depthScale);
+  }
+
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
-  if (S.state === 'WALL') {
+  if (!use3d && S.state === 'WALL') {
     if (prevState !== 'WALL') {
       smoothScale = 0.22;                    // new wall starts at the horizon
       if (wallSprite) wallSprite.alpha = 1;  // undo the fly-through fade
@@ -992,7 +1016,7 @@ app.ticker.add((dt) => {
     const fit = (S.match ?? 0) >= (S.passThreshold ?? PASS_THRESHOLD);
     wallSprite.tint = fit ? 0xccffcc : (S.tight ? 0xffe9b8 : 0xffffff);
     (smoothScale < 0.9 ? wallBehind : wallFront).addChild(wallSprite);
-  } else if (S.state === 'RESULT' && S.outcome === 'pass' && wallSprite) {
+  } else if (!use3d && S.state === 'RESULT' && S.outcome === 'pass' && wallSprite) {
     // brief impact hold (slow-mo beat), then accelerate through the hole
     const zt = Math.max(0, (S.resultT - 0.22) / 0.78);
     const z = 1 + 0.05 * Math.min(S.resultT / 0.22, 1) + 2.6 * Math.pow(zt, 1.6);
