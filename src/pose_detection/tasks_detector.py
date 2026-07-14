@@ -86,8 +86,8 @@ class TasksDetector(PoseDetector):
         self._votes = {'Left': collections.deque(maxlen=GESTURE_VOTES),
                        'Right': collections.deque(maxlen=GESTURE_VOTES)}
         self._gestures = {'Left': 'none', 'Right': 'none'}
-        self._fingers = {'Left': None, 'Right': None}   # [thumb..pinky] bools
         self._shapes = {'Left': None, 'Right': None}    # 21 wrist-normalized pts
+        self._face_missing = 999                        # frames since a face was seen
 
     def detect(self, frame):
         """Run pose + face + gestures; returns pose results (as before)."""
@@ -103,6 +103,13 @@ class TasksDetector(PoseDetector):
 
     def _detect_face(self, mp_img):
         res = self.face_lm.detect_for_video(mp_img, self._ts_ms)
+        if not res.face_blendshapes:
+            # decay toward neutral so a vanished face can't hold its last
+            # expression (and report stale after ~0.7s via _face_missing)
+            self._face_missing += 1
+            self._face = {k: v * 0.8 for k, v in self._face.items()}
+            return
+        self._face_missing = 0
         if res.face_blendshapes:
             shapes = {c.category_name: c.score for c in res.face_blendshapes[0]}
             smile = (shapes.get('mouthSmileLeft', 0) +
@@ -118,16 +125,18 @@ class TasksDetector(PoseDetector):
                 'blinkR': float(a * shapes.get('eyeBlinkRight', 0) +
                                 (1 - a) * self._face['blinkR']),
             }
-        # keep last values briefly when the face drops out (EMA decays anyway)
 
     def _detect_gestures(self, mp_img, shape):
         res = self.gesture_rec.recognize_for_video(mp_img, self._ts_ms)
         h, w = shape[:2]
         seen = {'Left': 'none', 'Right': 'none'}
-        fingers = {'Left': None, 'Right': None}
         shapes = {'Left': None, 'Right': None}
         for i, handedness in enumerate(res.handedness):
             side = handedness[0].category_name          # image-person anatomy
+            if seen[side] != 'none':
+                # MediaPipe sometimes labels both hands the same side —
+                # route the duplicate into the free slot instead of losing it
+                side = 'Left' if side == 'Right' else 'Right'
             pts = np.array([[lm.x * w, lm.y * h]
                             for lm in res.hand_landmarks[i]])
             name = res.gestures[i][0].category_name if res.gestures else 'None'
@@ -136,17 +145,10 @@ class TasksDetector(PoseDetector):
                 # canned model unsure — fall back to fingertip geometry
                 g = classify_gesture(pts)
             seen[side] = g
-            # per-finger extension: tip farther from wrist than mid joint
-            wrist = pts[0]
-            def ext(tip, mid):
-                return bool(np.linalg.norm(pts[tip] - wrist) >
-                            np.linalg.norm(pts[mid] - wrist))
-            fingers[side] = [ext(4, 2), ext(8, 6), ext(12, 10),
-                             ext(16, 14), ext(20, 18)]
             # wrist-normalized shape (unit = wrist->middle-MCP) for rendering
+            wrist = pts[0]
             size = float(np.linalg.norm(pts[9] - wrist)) or 1.0
             shapes[side] = np.round((pts - wrist) / size, 2).tolist()
-        self._fingers = fingers
         self._shapes = shapes
         for side in ('Left', 'Right'):
             self._votes[side].append(seen[side])
@@ -154,7 +156,9 @@ class TasksDetector(PoseDetector):
             self._gestures[side] = max(set(votes), key=votes.count)
 
     def face_metrics(self, results, frame_w, frame_h, mirrored=False):
-        """Smoothed blendshape scores; blink sides keyed by screen side."""
+        """Smoothed blendshape scores; None once the face has been gone ~0.7s."""
+        if self._face_missing > 20:
+            return None
         f = dict(self._face)
         if mirrored:
             f['blinkL'], f['blinkR'] = f['blinkR'], f['blinkL']
@@ -170,13 +174,6 @@ class TasksDetector(PoseDetector):
     def hand_shapes(self, mirrored=False):
         # wrist-normalized 21-point hand outlines keyed by screen side
         left, right = self._shapes['Left'], self._shapes['Right']
-        if mirrored:
-            return {'l': right, 'r': left}
-        return {'l': left, 'r': right}
-
-    def finger_states(self, mirrored=False):
-        """Per-finger extension [thumb..pinky] keyed by screen side."""
-        left, right = self._fingers['Left'], self._fingers['Right']
         if mirrored:
             return {'l': right, 'r': left}
         return {'l': left, 'r': right}

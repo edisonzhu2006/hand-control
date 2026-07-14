@@ -806,6 +806,7 @@ let bigPop = 1;
 let lastPoseName = '';
 let axSmooth = 0;
 let holeDxSmooth = 0;
+let prevState = '';
 
 app.ticker.add((dt) => {
   const dts = dt / 60;
@@ -840,12 +841,15 @@ app.ticker.add((dt) => {
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
     { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
-    { face: S.faceLive, hands: S.handsLive, fingers: S.fingersLive,
-      shapes: S.handShapes });
+    { face: S.faceLive, shapes: S.handShapes });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
   if (S.state === 'WALL') {
+    if (prevState !== 'WALL') {
+      smoothScale = 0.22;                    // new wall starts at the horizon
+      if (wallSprite) wallSprite.alpha = 1;  // undo the fly-through fade
+    }
     ensureWall(S);
     const target = 0.22 + 0.78 * Math.pow(S.progress, 2.2);
     smoothScale += (target - smoothScale) * Math.min(1, dts * 14);
@@ -955,8 +959,6 @@ app.ticker.add((dt) => {
     }
   } else if (S.state === 'COUNTDOWN') {
     ui.big.text = S.countdown > 0 ? String(S.countdown) : 'GO!';
-    const pulse = 1 + 0.25 * (1 - ((S.countdown ?? 0) % 1));
-    ui.big.scale.set(1);
     ui.sub.text = 'Mirror the stickman with your body';
   } else if (S.state === 'RESULT') {
     ui.big.text = S.outcome === 'pass' ? 'THROUGH!' : 'CRASHED!';
@@ -990,4 +992,5 @@ app.ticker.add((dt) => {
   bigPop = Math.min(1, bigPop + dts * 3.5);
   const over = 1 - bigPop;
   ui.big.scale.set(1 + 0.7 * over * over);
+  prevState = S.state;
 });

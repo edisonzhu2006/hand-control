@@ -82,6 +82,7 @@ WEB_POSES = WEB_POSES + [
      'hands': 'point', 'face': 'smile'},
 ]
 LEG_POOL = [p for p in WEB_POSES if p.get('needs_legs')]
+DAILY_POOL = [p for p in WEB_POSES if not p.get('needs_legs')]
 FACE_HAND_POOL = [p for p in WEB_POSES if p.get('face') or p.get('hands')]
 
 
@@ -221,10 +222,14 @@ class WebGame(HoleInWallGame):
         if legs_visible(body):
             self.legs_ok_until = now + 3.0
 
+    DAILY_POOL = None  # bound after module init; fixed so seeded RNGs agree
+
     def _pool(self, now=None):
         now = time.time() if now is None else now
         if self.leg_mode:
             return LEG_POOL
+        if self.mode == 'daily':
+            return WebGame.DAILY_POOL
         pool = WEB_POSES[:EASY_POOL] if self.level == 1 else WEB_POSES
         if now > self.legs_ok_until:
             pool = [p for p in pool if not p.get('needs_legs')]
@@ -236,10 +241,12 @@ class WebGame(HoleInWallGame):
 
     def new_wall(self, now):
         pool = self._pool(now)
-        if not self._order:
+        if not self._order or getattr(self, '_order_n', None) != len(pool):
             self._order = self._rng.permutation(len(pool)).tolist()
+            self._order_n = len(pool)
         idx = self._order.pop(0) % len(pool)
         if self.pose is not None and pool[idx] is self.pose and self._order:
+            self._order.append(idx)     # defer, don't drop, the colliding pose
             idx = self._order.pop(0) % len(pool)
         self.pose = pool[idx]
         self.deadline = now + self.round_time
@@ -316,29 +323,55 @@ class WebGame(HoleInWallGame):
         return float(np.clip((self._last_px - self.px0) * 260, -210, 210))
 
     def full_match(self, body, now):
-        # pose match blended with positional alignment for offset holes
-        match, seg_ok = match_pose_ex(body, self.pose)
-        if match is None:
+        # One weighted sum over every scored channel. Required channels whose
+        # landmarks are missing score 0 (not skipped) — otherwise a standing
+        # player with knees out of frame passes squat walls on arms alone, and
+        # nested averaging used to dilute leg weight below the pass bar.
+        arms, seg_ok = match_pose(body, self.pose['angles'])
+        if arms is None:
             return None, seg_ok
+        terms = [(arms, 4.0)]
+
+        if 'lean' in self.pose:
+            cur = torso_angle(body)
+            if cur is None:
+                lean_score = 0.0
+            else:
+                err = ang_diff(cur, self.pose['lean'])
+                lean_score = float(np.clip(
+                    1.0 - max(err - LEAN_TOLERANCE, 0.0) / 25.0, 0.0, 1.0))
+            seg_ok['lean'] = lean_score >= 0.6
+            terms.append((lean_score, 2.0))
+
+        if 'legs' in self.pose:
+            for a, b, key in (('l_hip', 'l_knee', 'lt'), ('r_hip', 'r_knee', 'rt')):
+                cur = seg_angle(body, a, b)
+                if cur is None:
+                    leg_score = 0.0
+                else:
+                    err = ang_diff(cur, self.pose['legs'][key])
+                    leg_score = float(np.clip(
+                        1.0 - max(err - 15.0, 0.0) / 30.0, 0.0, 1.0))
+                seg_ok[key] = leg_score >= 0.99
+                terms.append((leg_score, 3.0))
+
         if self.wall_dx or self.slide_amp:
             err = abs(self.avatar_x() - self.hole_dx(now))
             pos = float(np.clip(
                 1.0 - max(err - self.POS_FREE, 0.0) / self.POS_FALLOFF, 0.0, 1.0))
             seg_ok['pos'] = err < self.POS_FREE + 20
-            match = float((match * 4 + pos * 3) / 7)
+            terms.append((pos, 3.0))
+
         fs, hs = self.face_hand_scores()
-        extra_scores, extra_w = 0.0, 0.0
         if fs is not None:
             seg_ok['face'] = fs >= 0.6
-            extra_scores += fs * 2
-            extra_w += 2
+            terms.append((fs, 2.0))
         if hs is not None:
             seg_ok['hands'] = hs >= 0.9
-            extra_scores += hs * 2
-            extra_w += 2
-        if extra_w:
-            match = float((match * 4 + extra_scores) / (4 + extra_w))
-        return match, seg_ok
+            terms.append((hs, 2.0))
+
+        total_w = sum(w for _, w in terms)
+        return float(sum(s * w for s, w in terms) / total_w), seg_ok
 
     def target_payload(self):
         if self.pose is None:
@@ -440,7 +473,23 @@ class WebGame(HoleInWallGame):
         self.state = 'GAME_OVER'
         self.state_t0 = now
         self.new_record = False
+        self.record_score(max(s0, s1))
         return None
+
+    def record_score(self, score):
+        # persist any run's score (2P winners, abandoned runs) against the
+        # high score / daily best without changing the game-over display
+        changed = False
+        if score > self.high_score:
+            self.high_score = score
+            changed = True
+        if self.mode == 'daily' and self.daily_date:
+            prev = self.daily_scores.get(self.daily_date, 0)
+            if score > prev:
+                self.daily_scores[self.daily_date] = score
+                changed = True
+        if changed:
+            self._save_high_score()
 
     def _finish_game(self, now):
         self.state = 'GAME_OVER'
@@ -454,6 +503,7 @@ class WebGame(HoleInWallGame):
         self._save_high_score()
 
 LOCK = threading.Lock()
+CLIENTS = set()        # connected websockets (shared with the capture thread)
 LATEST = None          # most recent payload dict (with accumulated events)
 FLAGS = set()          # input flags from the browser: 'restart', 'skip'
 RUNNING = True
@@ -533,9 +583,13 @@ def _capture_session(pose_det, game):
             if not ret:
                 break
             last_frame[0] = time.time()
-            cam = cv2.resize(cv2.flip(cam, 1), (FRAME_W, FRAME_H))
             now = time.time()
             frame_i += 1
+            if not CLIENTS:
+                # keep frames flowing for the watchdog, skip all inference
+                time.sleep(0.05)
+                continue
+            cam = cv2.resize(cv2.flip(cam, 1), (FRAME_W, FRAME_H))
 
             results = pose_det.detect(cam)
             body = pose_det.get_body(results, FRAME_W, FRAME_H, mirrored=True)
@@ -567,7 +621,8 @@ def _capture_session(pose_det, game):
             if 'daily' in flags and game.state in ('MENU', 'GAME_OVER'):
                 game.start(now, 'daily')
             if 'menu' in flags and game.state != 'MENU':
-                game.state = 'MENU'    # abandon run, back to title
+                game.record_score(game.score)   # ESC must not eat a record run
+                game.state = 'MENU'
                 game.pose = None
             if 'toggle2p' in flags and game.state == 'MENU':
                 game.two_p = not game.two_p
@@ -586,7 +641,9 @@ def _capture_session(pose_det, game):
             if game.state == 'GAME_OVER' and prev_state != 'GAME_OVER':
                 events.append('gameover')
 
-            # small camera preview at ~half the frame rate
+            # small camera preview at ~half the frame rate; sent only on
+            # frames where it was actually re-encoded (client keeps the last)
+            pip_b64 = None
             if frame_i % 2 == 0:
                 small = cv2.resize(pose_det.draw(cam, results), (480, 270))
                 ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 72])
@@ -594,6 +651,7 @@ def _capture_session(pose_det, game):
                     pip_b64 = base64.b64encode(buf).decode('ascii')
 
             data = {
+                'seq': frame_i,
                 'state': game.state,
                 'pose': payload_pose(pose_from_body(body)),
                 'targetAngles': game.target_payload(),
@@ -630,8 +688,6 @@ def _capture_session(pose_det, game):
                 'faceReq': game.pose.get('face') if game.pose else None,
                 'handsReq': game.pose.get('hands') if game.pose else None,
                 'faceLive': game._face,
-                'handsLive': game._hands,
-                'fingersLive': pose_det.finger_states(mirrored=True),
                 'handShapes': pose_det.hand_shapes(mirrored=True),
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
@@ -656,18 +712,20 @@ async def ws_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     request.app['clients'].add(ws)
+    CLIENTS.add(ws)
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 try:
                     key = json.loads(msg.data).get('key')
-                except ValueError:
+                except (ValueError, AttributeError, TypeError):
                     continue
                 if key in ('restart', 'skip', 'daily', 'menu', 'toggle2p', 'togglelegs'):
                     with LOCK:
                         FLAGS.add(key)
     finally:
         request.app['clients'].discard(ws)
+        CLIENTS.discard(ws)
     return ws
 
 
@@ -677,15 +735,19 @@ async def index(_request):
 
 async def broadcaster(app):
     global LATEST
+    last_seq = None
     try:
         while True:
             await asyncio.sleep(1 / 30)
             with LOCK:
                 data = LATEST
-                if data is not None:
+                if data is not None and app['clients']:
                     LATEST = dict(data, events=[])   # events delivered once
             if data is None or not app['clients']:
                 continue
+            if data.get('seq') == last_seq and not data.get('events'):
+                continue                             # nothing new to send
+            last_seq = data.get('seq')
             text = json.dumps(data)
             for ws in list(app['clients']):
                 try:
@@ -724,3 +786,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+WebGame.DAILY_POOL = DAILY_POOL
