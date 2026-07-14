@@ -225,14 +225,12 @@ class WebGame(HoleInWallGame):
         if legs_visible(body):
             self.legs_ok_until = now + 3.0
 
-    DAILY_POOL = None  # bound after module init; fixed so seeded RNGs agree
-
     def _pool(self, now=None):
         now = time.time() if now is None else now
         if self.leg_mode:
             return LEG_POOL
         if self.mode == 'daily':
-            return WebGame.DAILY_POOL
+            return DAILY_POOL   # module-level fixed pool: seeded RNGs agree
         pool = WEB_POSES[:EASY_POOL] if self.level == 1 else WEB_POSES
         if now > self.legs_ok_until:
             pool = [p for p in pool if not p.get('needs_legs')]
