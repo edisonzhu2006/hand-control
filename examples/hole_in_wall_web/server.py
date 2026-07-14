@@ -215,6 +215,9 @@ class WebGame(HoleInWallGame):
         self._swapped = False
         self._last_px = 0.0
         self.px0 = 0.0
+        self._last_sw = 180.0
+        self.sw0 = 180.0
+        self.depth_req = 0
         self._face = None
         self._hands = None
 
@@ -263,6 +266,8 @@ class WebGame(HoleInWallGame):
         self.fake_pose = None
         self._swapped = False
         self.px0 = self._last_px    # where the player stands now = neutral
+        self.sw0 = self._last_sw     # shoulder width at wall spawn (depth ref)
+        self.depth_req = 0
         if lvl >= 2 and self._rng.rand() < 0.40:
             self.wall_dx = float(self._rng.choice([-1, 1]) *
                                  self._rng.uniform(80, 150))
@@ -273,6 +278,9 @@ class WebGame(HoleInWallGame):
         if lvl >= 3 and self._rng.rand() < 0.25:
             others = [p for p in pool if p is not self.pose]
             self.fake_pose = others[int(self._rng.rand() * len(others))]
+        if (lvl >= 2 and not self.wall_dx and not self.slide_amp and
+                self._rng.rand() < 0.30):
+            self.depth_req = int(self._rng.choice([-1, 1]))   # -1 back, +1 closer
 
     @property
     def pass_threshold(self):
@@ -311,12 +319,21 @@ class WebGame(HoleInWallGame):
         return fs, hs
 
     def note_px(self, body):
-        # track horizontal shoulder-center position, normalized -1..1
+        # track horizontal shoulder-center position (-1..1) and shoulder
+        # pixel width (the depth signal: closer = wider)
         if (body is not None and body.get('l_shoulder_vis', 0) > 0.3 and
                 body.get('r_shoulder_vis', 0) > 0.3):
             shc = (body['l_shoulder'][0] + body['r_shoulder'][0]) / 2
             self._last_px = float(shc / FRAME_W * 2 - 1)
+            sw = float(np.linalg.norm(body['r_shoulder'] - body['l_shoulder']))
+            if sw > 20:
+                self._last_sw = sw
         return self._last_px
+
+    def depth_delta(self):
+        # log size ratio vs wall spawn: + = stepped closer, - = stepped back
+        return float(np.clip(np.log(self._last_sw / max(self.sw0, 1.0)),
+                             -0.6, 0.6))
 
     def avatar_x(self):
         # arena offset from stepping sideways, relative to the wall-start spot
@@ -361,6 +378,13 @@ class WebGame(HoleInWallGame):
                 1.0 - max(err - self.POS_FREE, 0.0) / self.POS_FALLOFF, 0.0, 1.0))
             seg_ok['pos'] = err < self.POS_FREE + 20
             terms.append((pos, 3.0))
+
+        if self.depth_req:
+            delta = self.depth_delta()
+            err = max(0.0, 0.18 - self.depth_req * delta)
+            depth_score = float(np.clip(1.0 - err / 0.15, 0.0, 1.0))
+            seg_ok['depth'] = err < 0.04
+            terms.append((depth_score, 3.0))
 
         fs, hs = self.face_hand_scores()
         if fs is not None:
@@ -568,8 +592,16 @@ def _capture_session(pose_det, game):
 
             results = pose_det.detect(cam)
             body = pose_det.get_body(results, FRAME_W, FRAME_H, mirrored=True)
+            body3d = pose_det.get_body3d(results, mirrored=True)
+            if body3d and body:
+                # drop joints the 2D pass can't see (world coords for
+                # occluded legs are hallucinated and make the avatar flail)
+                body3d = {k: v for k, v in body3d.items()
+                          if body.get(k + '_vis', 0) > 0.3}
 
             match, seg_ok = None, {}
+            if body3d is None:
+                body3d = None
             if body is not None:
                 for name in PoseDetector.BODY:
                     body[name] = filters[name].apply(body[name])
@@ -664,6 +696,11 @@ def _capture_session(pose_det, game):
                 'handsReq': game.pose.get('hands') if game.pose else None,
                 'faceLive': game._face,
                 'handShapes': pose_det.hand_shapes(mirrored=True),
+                'pose3d': ({k: [round(float(v[0]), 3), round(float(v[1]), 3),
+                                round(float(v[2]), 3)] for k, v in body3d.items()}
+                           if body3d else None),
+                'depthReq': game.depth_req,
+                'depthDelta': round(game.depth_delta(), 3),
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,

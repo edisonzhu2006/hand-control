@@ -127,6 +127,32 @@ class PoseDetector:
             body[name + '_vis'] = float(lm.visibility)
         return body
 
+    def get_body3d(self, results, mirrored=False):
+        """Extract the BODY joints as 3D world coordinates in meters.
+
+        MediaPipe world landmarks: origin at the hip midpoint, x right,
+        y down, z increasing away from the camera. With mirrored=True the
+        sides are swapped and x negated so keys mean screen side, matching
+        get_body(mirrored=True).
+
+        Returns:
+            Dict of joint -> (x, y, z) float arrays, or None if no pose.
+        """
+        if not results.pose_world_landmarks:
+            return None
+        lms = results.pose_world_landmarks.landmark
+        body = {}
+        for name, idx in self.BODY.items():
+            if mirrored:
+                if name.startswith('l_'):
+                    name = 'r_' + name[2:]
+                elif name.startswith('r_'):
+                    name = 'l_' + name[2:]
+            lm = lms[idx]
+            x = -lm.x if mirrored else lm.x
+            body[name] = np.array([x, lm.y, lm.z], dtype=float)
+        return body
+
     def draw(self, frame, results):
         """Draw the full pose skeleton on the frame."""
         if results.pose_landmarks:

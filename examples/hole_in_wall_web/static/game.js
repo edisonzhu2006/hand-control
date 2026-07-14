@@ -42,6 +42,8 @@ app.stage.addChild(root);
 const bgLayer = new PIXI.Container();
 const wallBehind = new PIXI.Container();
 const avatarG = new PIXI.Graphics();
+avatarG.pivot.set(W / 2, 470);          // scale about the feet
+avatarG.position.set(W / 2, 470);
 const wallFront = new PIXI.Container();
 const fxG = new PIXI.Graphics();
 const vignetteLayer = new PIXI.Container();
@@ -237,6 +239,43 @@ function skeleton(anchor, pose, dims = SM) {
   return j;
 }
 
+// Perspective-project 3D world joints (meters, shoulder-centered) into
+// avatar space. Depth factors (dz) scale limb thickness: toward-camera
+// limbs grow, away-limbs shrink — the core of the 2.5D look.
+function project3d(P, anchor) {
+  const F = 1.5;   // virtual focal length in meters
+  const shc = [(P.l_shoulder[0] + P.r_shoulder[0]) / 2,
+               (P.l_shoulder[1] + P.r_shoulder[1]) / 2,
+               (P.l_shoulder[2] + P.r_shoulder[2]) / 2];
+  const sw = Math.hypot(P.r_shoulder[0] - P.l_shoulder[0],
+    P.r_shoulder[1] - P.l_shoulder[1], P.r_shoulder[2] - P.l_shoulder[2]);
+  const k = SM.shW / Math.max(0.22, sw);
+  const j = {}, dz = {};
+  const put = (key, w) => {
+    const rel = [w[0] - shc[0], w[1] - shc[1], w[2] - shc[2]];
+    const d = Math.max(0.7, Math.min(1.45, F / Math.max(0.5, F + rel[2])));
+    j[key] = [anchor.x + rel[0] * k * d, anchor.y + rel[1] * k * d];
+    dz[key] = d;
+  };
+  put('lSh', P.l_shoulder); put('rSh', P.r_shoulder);
+  put('lEl', P.l_elbow); put('lWr', P.l_wrist);
+  put('rEl', P.r_elbow); put('rWr', P.r_wrist);
+  put('lHip', P.l_hip); put('rHip', P.r_hip);
+  for (const [kk, name] of [['lKn', 'l_knee'], ['lAn', 'l_ankle'],
+    ['rKn', 'r_knee'], ['rAn', 'r_ankle']]) {
+    if (P[name]) put(kk, P[name]);
+  }
+  j.sc = [anchor.x, anchor.y]; dz.sc = 1;
+  j.hipc = [(j.lHip[0] + j.rHip[0]) / 2, (j.lHip[1] + j.rHip[1]) / 2];
+  dz.hipc = (dz.lHip + dz.rHip) / 2;
+  const nr = [P.nose[0] - shc[0], P.nose[1] - shc[1], P.nose[2] - shc[2]];
+  const nd = Math.max(0.75, Math.min(1.4, F / Math.max(0.5, F + nr[2])));
+  dz.head = nd;
+  j.head = [anchor.x + nr[0] * k * nd * 0.55,
+            anchor.y + nr[1] * k * nd * 0.75 - SM.headR * 0.35];
+  return { j, dz };
+}
+
 const ARM_SEGS = { lu: ['lSh', 'lEl'], lf: ['lEl', 'lWr'], ru: ['rSh', 'rEl'], rf: ['rEl', 'rWr'] };
 const LEG_SEGS = [['lHip', 'lKn'], ['lKn', 'lAn'], ['rHip', 'rKn'], ['rKn', 'rAn']];
 
@@ -360,10 +399,21 @@ function ensureWall(state) {
 
 function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   g.clear();
-  const j = skeleton(anchor, pose);
+  let j, dz = {};
+  if (live && live.p3 && live.p3.l_shoulder) {
+    const pr = project3d(live.p3, anchor);
+    j = pr.j; dz = pr.dz;
+    if (!j.lKn) {   // legs not tracked: borrow the relaxed 2D stance
+      const j2 = skeleton(anchor, pose);
+      for (const kk of ['lKn', 'lAn', 'rKn', 'rAn']) { j[kk] = j2[kk]; dz[kk] = 1; }
+    }
+  } else {
+    j = skeleton(anchor, pose);
+  }
+  const dep = (a, b) => ((dz[a] || 1) + (dz[b] || 1)) / 2;
   const t = SM.t;
   const line = (a, b, w, color) => {
-    g.lineStyle({ width: w, color, cap: PIXI.LINE_CAP.ROUND });
+    g.lineStyle({ width: w * dep(a, b), color, cap: PIXI.LINE_CAP.ROUND });
     g.moveTo(...j[a]).lineTo(...j[b]);
   };
 
@@ -406,11 +456,12 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   ];
   for (const [side, wr] of [['l', 'lWr'], ['r', 'rWr']]) {
     const shape = live && live.shapes ? live.shapes[side] : null;
+    const wd = dz[wr] || 1;
     if (!shape) {
-      g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62).endFill();
+      g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62 * wd).endFill();
       continue;
     }
-    const s = t * 1.05;   // wrist->middle-knuckle distance on the avatar
+    const s = t * 1.05 * wd;   // wrist->middle-knuckle distance, depth-scaled
     const px = (i) => [j[wr][0] + shape[i][0] * s, j[wr][1] + shape[i][1] * s];
     g.lineStyle({ width: 5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND,
       join: PIXI.LINE_JOIN.ROUND });
@@ -426,7 +477,7 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   }
 
   // head: clean circle, eyes only (no mouth — mouths read goofy at this scale)
-  const r = SM.headR;
+  const r = SM.headR * (dz.head || 1);
   g.lineStyle(4, COL.outline).beginFill(COL.fill)
     .drawCircle(...j.head, r).endFill().lineStyle(0);
   // specular highlight ties him into the stage lighting
@@ -903,14 +954,16 @@ app.ticker.add((dt) => {
   }
   if (S.state === 'MENU') lastPoseName = '';
 
-  // avatar breathes and steps sideways with the player
+  // avatar breathes, steps sideways, and moves in depth with the player
+  const depthScale = Math.max(0.7, Math.min(1.4, 1 + (S.depthDelta || 0) * 0.9));
+  avatarG.scale.set(depthScale);
   const breath = Math.sin(performance.now() / 640) * 2.2;
   axSmooth += ((S.ax || 0) - axSmooth) * Math.min(1, dts * 12);
   holeDxSmooth += ((S.holeDx || 0) - holeDxSmooth) * Math.min(1, dts * 14);
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
     { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
-    { face: S.faceLive, shapes: S.handShapes });
+    { face: S.faceLive, shapes: S.handShapes, p3: S.pose3d });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
@@ -920,7 +973,8 @@ app.ticker.add((dt) => {
       if (wallSprite) wallSprite.alpha = 1;  // undo the fly-through fade
     }
     ensureWall(S);
-    const target = 0.22 + 0.78 * Math.pow(S.progress, 2.2);
+    const target = (0.22 + 0.78 * Math.pow(S.progress, 2.2)) *
+      (1 + 0.18 * (S.depthReq || 0));
     smoothScale += (target - smoothScale) * Math.min(1, dts * 14);
     wallSprite.scale.set(smoothScale);
     wallSprite.position.x = W / 2 + holeDxSmooth * smoothScale;
@@ -997,7 +1051,8 @@ app.ticker.add((dt) => {
   }
 
   if (S.state === 'WALL') {
-    setText(ui.poseName, S.poseName + (S.tight ? '  -  TIGHT x2!' : ''));
+    setText(ui.poseName, S.poseName + (S.tight ? '  -  TIGHT x2!' : '') +
+      (S.depthReq ? (S.depthReq > 0 ? '  -  STEP CLOSER' : '  -  STEP BACK') : ''));
     const reqs = [];
     if (S.faceReq) {
       reqs.push(`${S.faceReq === 'smile' ? 'SMILE' : 'WOW MOUTH'} ${S.segOk && S.segOk.face ? 'OK!' : '...'}`);
@@ -1022,6 +1077,9 @@ app.ticker.add((dt) => {
     const stepErr = (S.holeDx || 0) - (S.ax || 0);
     if (S.segOk && S.segOk.pos === false && Math.abs(stepErr) > 55) {
       lockText.text = stepErr > 0 ? 'STEP RIGHT  -->' : '<--  STEP LEFT';
+      lockText.style.fill = 0xffc85c;
+    } else if (S.segOk && S.segOk.depth === false) {
+      lockText.text = S.depthReq > 0 ? 'STEP CLOSER!' : 'STEP BACK!';
       lockText.style.fill = 0xffc85c;
     } else {
       lockText.style.fill = 0x7ce89a;
