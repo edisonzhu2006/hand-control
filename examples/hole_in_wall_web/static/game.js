@@ -40,8 +40,9 @@ const wallBehind = new PIXI.Container();
 const avatarG = new PIXI.Graphics();
 const wallFront = new PIXI.Container();
 const fxG = new PIXI.Graphics();
+const vignetteLayer = new PIXI.Container();
 const uiLayer = new PIXI.Container();
-root.addChild(bgLayer, wallBehind, avatarG, wallFront, fxG, uiLayer);
+root.addChild(bgLayer, wallBehind, avatarG, wallFront, fxG, vignetteLayer, uiLayer);
 
 try {
   if (app.renderer.type === PIXI.RENDERER_TYPE.WEBGL) {
@@ -54,55 +55,91 @@ try {
 /* -------------------------------------------------------------- background */
 
 function buildBackground() {
-  const g = new PIXI.Graphics();
+  // Painted backdrop on a 2D canvas (real gradients beat banded fills), then
+  // a Graphics layer for the grid lines.
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
   const horizon = H * 0.52;
-  // sky gradient in bands
-  for (let i = 0; i < 40; i++) {
-    const a = i / 39;
-    const c = lerpColor(COL.sky0, COL.sky1, a);
-    g.beginFill(c).drawRect(0, (horizon / 40) * i, W, horizon / 40 + 1).endFill();
+
+  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, '#101018');
+  sky.addColorStop(0.75, '#1e2030');
+  sky.addColorStop(1, '#2a2c40');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, horizon);
+
+  // warm stage glow behind the avatar (dimmer core so the hole doesn't go muddy)
+  const glow = ctx.createRadialGradient(W / 2, ANCHOR.y + 80, 40, W / 2, ANCHOR.y + 80, 340);
+  glow.addColorStop(0, 'rgba(226,203,158,0.16)');
+  glow.addColorStop(0.5, 'rgba(214,186,140,0.08)');
+  glow.addColorStop(1, 'rgba(200,170,120,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  // light cones from the rig
+  for (const [x0, tilt] of [[W * 0.16, 0.16], [W * 0.84, -0.16]]) {
+    const cone = ctx.createLinearGradient(x0, 0, x0, H * 0.95);
+    cone.addColorStop(0, 'rgba(235,222,190,0.10)');
+    cone.addColorStop(1, 'rgba(235,222,190,0)');
+    ctx.fillStyle = cone;
+    ctx.beginPath();
+    ctx.moveTo(x0 - 14, -4);
+    ctx.lineTo(x0 + 14, -4);
+    ctx.lineTo(x0 + tilt * H + 120, H * 0.95);
+    ctx.lineTo(x0 + tilt * H - 120, H * 0.95);
+    ctx.closePath();
+    ctx.fill();
   }
-  // stage glow behind the avatar — silhouette contrast, TV-studio feel
-  for (let i = 9; i >= 1; i--) {
-    g.beginFill(0xd8c9a8, 0.018 * i)
-      .drawEllipse(W / 2, ANCHOR.y + 90, 90 + i * 34, 130 + i * 26).endFill();
-  }
-  // faint horizon line
-  for (let i = 3; i >= 1; i--) {
-    g.beginFill(COL.gridGlow, 0.05 * i)
-      .drawEllipse(W / 2, horizon, W * 0.55, 4 + i * 4).endFill();
-  }
-  // floor
+
+  const floor = ctx.createLinearGradient(0, horizon, 0, H);
+  floor.addColorStop(0, '#232830');
+  floor.addColorStop(1, '#0c0e12');
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, horizon, W, H - horizon);
+
+  // spotlight pool under the avatar
+  const pool = ctx.createRadialGradient(W / 2, H * 0.9, 20, W / 2, H * 0.9, 260);
+  pool.addColorStop(0, 'rgba(245,233,208,0.16)');
+  pool.addColorStop(1, 'rgba(245,233,208,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, horizon, W, H - horizon);
+
+  // dust motes
   for (let i = 0; i < 30; i++) {
-    const a = i / 29;
-    const c = lerpColor(0x1c2126, 0x0d0f12, a);
-    g.beginFill(c).drawRect(0, horizon + ((H - horizon) / 30) * i, W,
-      (H - horizon) / 30 + 1).endFill();
+    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.2 + 0.04})`;
+    ctx.beginPath();
+    ctx.arc(Math.random() * W, Math.random() * horizon * 0.85,
+      Math.random() * 1.2 + 0.3, 0, 7);
+    ctx.fill();
   }
-  // quiet perspective grid
-  g.lineStyle(1.5, COL.grid, 0.5);
+  bgLayer.addChild(new PIXI.Sprite(PIXI.Texture.from(cv)));
+
+  // whisper-quiet perspective grid
+  const g = new PIXI.Graphics();
+  g.lineStyle(1, 0x3a4450, 0.28);
   for (let x = -W; x <= 2 * W; x += W / 6) {
     g.moveTo(x, H).lineTo(W / 2, horizon);
   }
   for (let i = 1; i <= 6; i++) {
     const y = horizon + (H - horizon) * Math.pow(i / 6, 1.8);
-    g.lineStyle(1.5, COL.grid, 0.25 + 0.3 * (i / 6));
+    g.lineStyle(1, 0x3a4450, 0.12 + 0.2 * (i / 6));
     g.moveTo(0, y).lineTo(W, y);
   }
-  // spotlight pool under the avatar
-  for (let i = 5; i >= 1; i--) {
-    g.beginFill(0xf5e9d0, 0.02 * i).drawEllipse(W / 2, H * 0.9, 150 + i * 16, 24 + i * 4).endFill();
-  }
   bgLayer.addChild(g);
+}
 
-  // sparse dust motes
-  const stars = new PIXI.Graphics();
-  for (let i = 0; i < 34; i++) {
-    stars.beginFill(0xffffff, Math.random() * 0.25 + 0.05)
-      .drawCircle(Math.random() * W, Math.random() * horizon * 0.9,
-        Math.random() * 1.3 + 0.3).endFill();
-  }
-  bgLayer.addChild(stars);
+function buildVignette() {
+  // cinematic dark corners over the scene, under the UI text
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const vg = ctx.createRadialGradient(W / 2, H * 0.46, H * 0.42, W / 2, H * 0.5, H * 0.95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+  return new PIXI.Sprite(PIXI.Texture.from(cv));
 }
 
 function lerpColor(c0, c1, a) {
@@ -159,38 +196,63 @@ const LEG_SEGS = [['lHip', 'lKn'], ['lKn', 'lAn'], ['rHip', 'rKn'], ['rKn', 'rAn
 let wallSprite = null;
 let wallForPose = null;
 
+// Wall texture extends below the frame so the scaled-down (distant) wall
+// doesn't visibly float above the floor.
+const WALL_H = H + 220;
+// Scale the wall about the hole's center, not the frame center — the hole
+// then stays locked on the avatar for the whole approach.
+const HOLE_CY = 280;
+
 function buildWallTexture(angles) {
   // Offscreen 2D canvas: bricks, then punch the silhouette hole with
   // destination-out; the pre-stroked wider silhouette leaves a rim ring.
   const cv = document.createElement('canvas');
-  cv.width = W; cv.height = H;
+  cv.width = W; cv.height = WALL_H;
   const ctx = cv.getContext('2d');
 
-  ctx.fillStyle = '#a85835';
-  ctx.fillRect(0, 0, W, H);
-  // per-brick tonal variation, then soft mortar lines
+  // base coat with top-down lighting
+  const base = ctx.createLinearGradient(0, 0, 0, WALL_H);
+  base.addColorStop(0, '#b06038');
+  base.addColorStop(1, '#7e4226');
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, W, WALL_H);
+
+  // bricks: tonal variation + a light top edge and dark bottom edge per brick
   const step = 44;
-  for (let y = 0; y < H; y += step) {
+  for (let y = 0; y < WALL_H; y += step) {
     const off = (y / step) % 2 ? step : 0;
     for (let x = off - step * 2; x < W; x += step * 2) {
-      const v = Math.random() * 16 - 8;
-      ctx.fillStyle = `rgb(${168 + v},${88 + v * 0.6},${53 + v * 0.4})`;
+      const shade = 1 - 0.25 * (y / WALL_H);
+      const v = (Math.random() * 14 - 7) * shade;
+      const r = (172 + v) * shade, gr = (92 + v * 0.6) * shade, b = (56 + v * 0.4) * shade;
+      ctx.fillStyle = `rgb(${r | 0},${gr | 0},${b | 0})`;
       ctx.fillRect(x + 2, y + 2, step * 2 - 4, step - 4);
+      ctx.fillStyle = 'rgba(255,235,210,0.10)';
+      ctx.fillRect(x + 2, y + 2, step * 2 - 4, 3);
+      ctx.fillStyle = 'rgba(30,10,4,0.22)';
+      ctx.fillRect(x + 2, y + step - 5, step * 2 - 4, 3);
     }
   }
-  ctx.strokeStyle = 'rgba(90,42,22,0.55)';
-  ctx.lineWidth = 3;
-  for (let y = 0; y < H; y += step) {
+  // soft mortar joints
+  ctx.strokeStyle = 'rgba(58,26,14,0.5)';
+  ctx.lineWidth = 2;
+  for (let y = 0; y < WALL_H; y += step) {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     const off = (y / step) % 2 ? step : 0;
     for (let x = off; x < W; x += step * 2) {
       ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + step); ctx.stroke();
     }
   }
-  // subtle vignette on the wall
-  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H);
-  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,5,0,0.4)');
-  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  // speckle noise so the surface isn't flat
+  for (let i = 0; i < 1200; i++) {
+    ctx.fillStyle = Math.random() < 0.5
+      ? 'rgba(255,220,190,0.05)' : 'rgba(40,12,4,0.07)';
+    ctx.fillRect(Math.random() * W, Math.random() * WALL_H, 2, 2);
+  }
+  // vignette on the wall itself, centered on the hole
+  const vg = ctx.createRadialGradient(W / 2, HOLE_CY, H * 0.3, W / 2, HOLE_CY, WALL_H * 0.85);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(16,4,0,0.45)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, WALL_H);
 
   const pose = poseFromAngles(angles);
   const j = skeleton(ANCHOR, pose);
@@ -219,20 +281,20 @@ function buildWallTexture(angles) {
     }
   };
 
-  // rim ring first (white), then cut the hole
-  ctx.strokeStyle = ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  // rim ring first (warm white), then cut the hole, then a dark inner lip
+  // (source-atop only paints on remaining wall) so the cutout reads as deep
+  ctx.strokeStyle = ctx.fillStyle = 'rgba(248,240,228,0.95)';
   drawSilhouette(12);
   ctx.globalCompositeOperation = 'destination-out';
   ctx.strokeStyle = ctx.fillStyle = '#000';
   drawSilhouette(0);
+  ctx.globalCompositeOperation = 'source-atop';
+  ctx.strokeStyle = ctx.fillStyle = 'rgba(20,8,2,0.5)';
+  drawSilhouette(7);
   ctx.globalCompositeOperation = 'source-over';
 
   return PIXI.Texture.from(cv);
 }
-
-// Scale the wall about the hole's center, not the frame center — the hole
-// then stays locked on the avatar for the whole approach.
-const HOLE_CY = 280;
 
 function ensureWall(state) {
   if (!state.targetAngles) return;
@@ -240,7 +302,7 @@ function ensureWall(state) {
   if (wallForPose === key && wallSprite) return;
   if (wallSprite) { wallSprite.destroy(true); }
   wallSprite = new PIXI.Sprite(buildWallTexture(state.targetAngles));
-  wallSprite.anchor.set(0.5, HOLE_CY / H);
+  wallSprite.anchor.set(0.5, HOLE_CY / WALL_H);
   wallSprite.position.set(W / 2, HOLE_CY);
   wallForPose = key;
 }
@@ -255,6 +317,11 @@ function drawAvatar(g, pose, face, segOk) {
     g.lineStyle({ width: w, color, cap: PIXI.LINE_CAP.ROUND });
     g.moveTo(...j[a]).lineTo(...j[b]);
   };
+
+  // contact shadow grounds him on the floor
+  const feetY = Math.max(j.lAn[1], j.rAn[1]) + t * 0.5;
+  g.beginFill(0x000000, 0.32)
+    .drawEllipse((j.lAn[0] + j.rAn[0]) / 2, feetY + 6, 86, 13).endFill();
 
   // outline pass (whole body first, so overlaps merge into one silhouette)
   for (const [a, b] of LEG_SEGS) line(a, b, t + 6, COL.outline);
@@ -291,6 +358,9 @@ function drawAvatar(g, pose, face, segOk) {
   const r = SM.headR;
   g.lineStyle(4, COL.outline).beginFill(COL.fill)
     .drawCircle(...j.head, r).endFill().lineStyle(0);
+  // specular highlight ties him into the stage lighting
+  g.beginFill(0xffffff, 0.35)
+    .drawEllipse(j.head[0] - r * 0.32, j.head[1] - r * 0.42, r * 0.3, r * 0.18).endFill();
   const ex = j.head[0] + pose.head_dx * r * 0.3;
   const ey = j.head[1] - r / 8;
   if (face === 'hit') {
@@ -468,33 +538,48 @@ const SFX = {
 /* ------------------------------------------------------------- state + io */
 
 let S = null;
+let ws = null;
+let wsUp = false;
 const pip = document.getElementById('pip');
 
-const ws = new WebSocket(`ws://${location.host}/ws`);
-ws.onmessage = (m) => {
-  S = JSON.parse(m.data);
-  for (const ev of S.events || []) {
-    if (SFX[ev]) SFX[ev]();
-    if (ev === 'crash') { shake = 1; flashA = 0.55; burst(W / 2, H * 0.5); }
-    if (ev === 'pass' || ev === 'perfect') {
-      popup(`+${100 * S.mult + (ev === 'perfect' ? 50 : 0)}${ev === 'perfect' ? ' PERFECT!' : ''}`,
-        W / 2, 150, 0x66ff99);
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { wsUp = true; };
+  ws.onclose = () => { wsUp = false; setTimeout(connect, 1500); };
+  ws.onerror = () => { try { ws.close(); } catch (e) { /* already closed */ } };
+  ws.onmessage = (m) => {
+    S = JSON.parse(m.data);
+    for (const ev of S.events || []) {
+      if (SFX[ev]) SFX[ev]();
+      if (ev === 'crash') { shake = 1; flashA = 0.55; burst(W / 2, H * 0.5); }
+      if (ev === 'pass' || ev === 'perfect') {
+        popup(`+${100 * S.mult + (ev === 'perfect' ? 50 : 0)}${ev === 'perfect' ? ' PERFECT!' : ''}`,
+          W / 2, 150, 0x66ff99);
+      }
     }
-  }
-  if (S.pip) pip.src = 'data:image/jpeg;base64,' + S.pip;
-};
+    if (S.pip) pip.src = 'data:image/jpeg;base64,' + S.pip;
+  };
+}
+connect();
+
+function sendKey(key) {
+  if (wsUp) ws.send(JSON.stringify({ key }));
+}
 
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space') { ws.send(JSON.stringify({ key: 'restart' })); e.preventDefault(); }
-  if (e.key === 's') ws.send(JSON.stringify({ key: 'skip' }));
+  if (e.code === 'Space') { sendKey('restart'); e.preventDefault(); }
+  if (e.key === 's') sendKey('skip');
 });
 
 /* ------------------------------------------------------------ render loop */
 
 buildBackground();
+vignetteLayer.addChild(buildVignette());
 drawHearts(3);
 
 let smoothScale = 0.22;
+let lastBig = '';
+let bigPop = 1;
 
 app.ticker.add((dt) => {
   const dts = dt / 60;
@@ -568,6 +653,7 @@ app.ticker.add((dt) => {
     drawMeter(S.match);
     drawChip(S.targetAngles);
     if (!S.tracked) ui.sub.text = 'Step back so the camera sees both your arms';
+    else if (S.match == null) ui.sub.text = 'Move back a bit - both arms need to be in view';
   } else if (S.state === 'COUNTDOWN') {
     ui.big.text = S.countdown > 0 ? String(S.countdown) : 'GO!';
     const pulse = 1 + 0.25 * (1 - ((S.countdown ?? 0) % 1));
@@ -585,4 +671,13 @@ app.ticker.add((dt) => {
     overHigh.style.fill = S.newRecord ? 0x66ff99 : 0xcccccc;
     overHint.text = 'press SPACE to play again';
   }
+
+  // pop-in on every big-text change (countdown digits, GO!, THROUGH!, CRASHED!)
+  if (ui.big.text !== lastBig) {
+    lastBig = ui.big.text;
+    if (lastBig) bigPop = 0;
+  }
+  bigPop = Math.min(1, bigPop + dts * 3.5);
+  const over = 1 - bigPop;
+  ui.big.scale.set(1 + 0.7 * over * over);
 });

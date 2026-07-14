@@ -52,20 +52,61 @@ def payload_pose(pose):
 
 
 def capture_loop():
-    """Camera + detection + game logic thread; publishes LATEST payloads."""
-    global LATEST, RUNNING
+    """Camera + detection + game logic thread; publishes LATEST payloads.
+
+    Wrapped in a reopen-on-failure supervisor: a macOS camera can hang
+    cap.read() forever (sleep, device contention), so a watchdog thread
+    releases the capture when frames stop flowing, which unblocks the read
+    and lets this loop reopen the device.
+    """
+    global RUNNING
     pose_det = PoseDetector(confidence=0.5, model_complexity=1)
+    game = HoleInWallGame(time.time())
+    game.sounds.paths = {}          # browser plays the sounds instead
+
+    while RUNNING:
+        try:
+            _capture_session(pose_det, game)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        if RUNNING:
+            print('Camera session ended; reopening in 1s...')
+            time.sleep(1.0)
+    pose_det.close()
+    print(f'Final score: {game.score} (high score: {game.high_score})')
+
+
+def _capture_session(pose_det, game):
+    """One camera session: runs until the camera fails or stalls."""
+    global LATEST
     filters = {name: OneEuroFilter(FILTER_MIN_CUTOFF, FILTER_BETA)
                for name in PoseDetector.BODY}
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print('Error: could not open webcam')
-        RUNNING = False
+        time.sleep(2.0)
         return
 
-    game = HoleInWallGame(time.time())
-    game.sounds.paths = {}          # browser plays the sounds instead
+    # Watchdog: if no frame lands for 3s, release the capture from outside,
+    # which unblocks a hung cap.read().
+    last_frame = [time.time()]
+    session_alive = [True]
+
+    def watchdog():
+        while session_alive[0] and RUNNING:
+            if time.time() - last_frame[0] > 3.0:
+                print('Watchdog: camera stalled, releasing capture')
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                return
+            time.sleep(0.5)
+
+    threading.Thread(target=watchdog, daemon=True).start()
+
     frame_i = 0
     pip_b64 = None
     print('Tracking started.')
@@ -75,6 +116,7 @@ def capture_loop():
             ret, cam = cap.read()
             if not ret:
                 break
+            last_frame[0] = time.time()
             cam = cv2.resize(cv2.flip(cam, 1), (FRAME_W, FRAME_H))
             now = time.time()
             frame_i += 1
@@ -149,9 +191,11 @@ def capture_loop():
                 data['events'] = events
                 LATEST = data
     finally:
-        cap.release()
-        pose_det.close()
-        print(f'Final score: {game.score} (high score: {game.high_score})')
+        session_alive[0] = False
+        try:
+            cap.release()
+        except Exception:
+            pass
 
 
 async def ws_handler(request):
