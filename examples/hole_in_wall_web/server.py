@@ -632,6 +632,7 @@ def _capture_session(pose_det, game):
                 'faceLive': game._face,
                 'handsLive': game._hands,
                 'fingersLive': pose_det.finger_states(mirrored=True),
+                'handShapes': pose_det.hand_shapes(mirrored=True),
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,

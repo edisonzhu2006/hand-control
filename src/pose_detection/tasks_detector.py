@@ -87,6 +87,7 @@ class TasksDetector(PoseDetector):
                        'Right': collections.deque(maxlen=GESTURE_VOTES)}
         self._gestures = {'Left': 'none', 'Right': 'none'}
         self._fingers = {'Left': None, 'Right': None}   # [thumb..pinky] bools
+        self._shapes = {'Left': None, 'Right': None}    # 21 wrist-normalized pts
 
     def detect(self, frame):
         """Run pose + face + gestures; returns pose results (as before)."""
@@ -124,6 +125,7 @@ class TasksDetector(PoseDetector):
         h, w = shape[:2]
         seen = {'Left': 'none', 'Right': 'none'}
         fingers = {'Left': None, 'Right': None}
+        shapes = {'Left': None, 'Right': None}
         for i, handedness in enumerate(res.handedness):
             side = handedness[0].category_name          # image-person anatomy
             pts = np.array([[lm.x * w, lm.y * h]
@@ -141,7 +143,11 @@ class TasksDetector(PoseDetector):
                             np.linalg.norm(pts[mid] - wrist))
             fingers[side] = [ext(4, 2), ext(8, 6), ext(12, 10),
                              ext(16, 14), ext(20, 18)]
+            # wrist-normalized shape (unit = wrist->middle-MCP) for rendering
+            size = float(np.linalg.norm(pts[9] - wrist)) or 1.0
+            shapes[side] = np.round((pts - wrist) / size, 2).tolist()
         self._fingers = fingers
+        self._shapes = shapes
         for side in ('Left', 'Right'):
             self._votes[side].append(seen[side])
             votes = list(self._votes[side])
@@ -157,6 +163,13 @@ class TasksDetector(PoseDetector):
     def hand_gestures(self, results, frame_w, frame_h, mirrored=False):
         """Majority-voted gestures keyed by screen side."""
         left, right = self._gestures['Left'], self._gestures['Right']
+        if mirrored:
+            return {'l': right, 'r': left}
+        return {'l': left, 'r': right}
+
+    def hand_shapes(self, mirrored=False):
+        # wrist-normalized 21-point hand outlines keyed by screen side
+        left, right = self._shapes['Left'], self._shapes['Right']
         if mirrored:
             return {'l': right, 'r': left}
         return {'l': left, 'r': right}

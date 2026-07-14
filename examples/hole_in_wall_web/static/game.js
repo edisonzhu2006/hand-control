@@ -394,26 +394,31 @@ function drawAvatar(g, pose, face, segOk, anchor = ANCHOR, live = null) {
   }
   g.lineStyle(0);
 
-  // hands: always five fingers; each ray's length mirrors that finger live
-  const FAN = [-0.72, -0.34, 0, 0.3, 0.58];   // thumb..pinky spread
-  for (const [side, wr, el] of [['l', 'lWr', 'lEl'], ['r', 'rWr', 'rEl']]) {
-    const states = live && live.fingers && live.fingers[side]
-      ? live.fingers[side] : [true, true, true, true, true];
-    const rF = t * 0.6;
-    g.beginFill(COL.extremity).drawCircle(...j[wr], rF).endFill();
-    const d = [j[wr][0] - j[el][0], j[wr][1] - j[el][1]];
-    const n = Math.hypot(d[0], d[1]) || 1;
-    const dir = [d[0] / n, d[1] / n];
-    for (let f = 0; f < 5; f++) {
-      const a = side === 'l' ? FAN[f] : -FAN[f];   // thumb toward the body
-      const ca = Math.cos(a), sa = Math.sin(a);
-      const rd = [dir[0] * ca - dir[1] * sa, dir[0] * sa + dir[1] * ca];
-      const len = states[f] ? (f === 0 ? t * 0.8 : t * 1.05) : t * 0.32;
-      g.lineStyle({ width: 4.5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND });
-      g.moveTo(j[wr][0] + rd[0] * rF * 0.75, j[wr][1] + rd[1] * rF * 0.75)
-        .lineTo(j[wr][0] + rd[0] * (rF + len), j[wr][1] + rd[1] * (rF + len));
-      g.lineStyle(0);
+  // hands: draw the player's real hand skeleton, scaled to the avatar.
+  // Both live in the same mirrored screen space, so no rotation is needed.
+  const HAND_BONES = [
+    [0, 1], [1, 2], [2, 3], [3, 4],          // thumb
+    [0, 5], [5, 6], [6, 7], [7, 8],          // index
+    [5, 9], [9, 10], [10, 11], [11, 12],     // middle
+    [9, 13], [13, 14], [14, 15], [15, 16],   // ring
+    [13, 17], [17, 18], [18, 19], [19, 20],  // pinky
+    [0, 17],                                  // palm edge
+  ];
+  for (const [side, wr] of [['l', 'lWr'], ['r', 'rWr']]) {
+    const shape = live && live.shapes ? live.shapes[side] : null;
+    if (!shape) {
+      g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.62).endFill();
+      continue;
     }
+    const s = t * 1.05;   // wrist->middle-knuckle distance on the avatar
+    const px = (i) => [j[wr][0] + shape[i][0] * s, j[wr][1] + shape[i][1] * s];
+    g.lineStyle({ width: 5, color: COL.extremity, cap: PIXI.LINE_CAP.ROUND,
+      join: PIXI.LINE_JOIN.ROUND });
+    for (const [a, b] of HAND_BONES) {
+      g.moveTo(...px(a)).lineTo(...px(b));
+    }
+    g.lineStyle(0);
+    g.beginFill(COL.extremity).drawCircle(...j[wr], t * 0.34).endFill();
   }
   for (const [an, s] of [['lAn', -1], ['rAn', 1]]) {
     g.beginFill(COL.extremity)
@@ -835,7 +840,8 @@ app.ticker.add((dt) => {
   const face = S.state === 'RESULT' ? (S.outcome === 'pass' ? 'win' : 'hit') : 'idle';
   drawAvatar(avatarG, S.pose, face, S.state === 'WALL' ? S.segOk : null,
     { x: ANCHOR.x + axSmooth, y: ANCHOR.y + breath },
-    { face: S.faceLive, hands: S.handsLive, fingers: S.fingersLive });
+    { face: S.faceLive, hands: S.handsLive, fingers: S.fingersLive,
+      shapes: S.handShapes });
 
   // wall (sprite shifts horizontally for offset / sliding holes)
   wallBehind.removeChildren(); wallFront.removeChildren();
