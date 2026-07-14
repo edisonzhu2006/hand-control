@@ -449,6 +449,7 @@ const mkText = (size, fill, stroke = 0x000000, strokeW = 5, family = FONT) =>
 const ui = {
   poseName: mkText(32, 0xffffff), timer: mkText(22, 0xffffff, 0x000000, 4, FONT_UI),
   score: mkText(18, 0xffffff, 0x000000, 4, FONT_UI),
+  score2: mkText(18, 0xffd98c, 0x000000, 4, FONT_UI),
   level: mkText(15, 0x74c7d4, 0x000000, 4, FONT_UI),
   big: mkText(84, 0xffffff, 0x000000, 9),
   sub: mkText(16, 0xdddddd, 0x000000, 4, FONT_UI),
@@ -458,11 +459,12 @@ const ui = {
 };
 ui.poseName.anchor.set(0.5, 0); ui.poseName.position.set(W / 2, 8);
 ui.timer.anchor.set(0.5, 0); ui.timer.position.set(W / 2, 50);
-ui.score.position.set(16, 58); ui.level.position.set(16, 92);
+ui.score.position.set(16, 58); ui.score2.position.set(16, 86);
+ui.level.position.set(16, 118);
 ui.big.anchor.set(0.5); ui.big.position.set(W / 2, H / 2 - 50);
 ui.sub.anchor.set(0.5); ui.sub.position.set(W / 2, H - 46);
 uiLayer.addChild(ui.meterG, ui.heartsG, ui.chipG, ui.poseName, ui.timer,
-  ui.score, ui.level, ui.sub, ui.big, ui.over);
+  ui.score, ui.score2, ui.level, ui.sub, ui.big, ui.over);
 
 // menu texts
 const menuTitle = mkText(58, 0xf0ede4, 0x000000, 8);
@@ -522,7 +524,7 @@ function drawChip(angles) {
   const g = ui.chipG;
   g.clear();
   if (!angles) return;
-  const cx = 72, top = 130;   // left HUD column, clear of the avatar
+  const cx = 72, top = 152;   // left HUD column, clear of the avatar
   g.beginFill(0x000000, 0.45).drawRoundedRect(cx - 56, top, 112, 118, 10).endFill();
   g.lineStyle(1.5, 0xffffff, 0.35).drawRoundedRect(cx - 56, top, 112, 118, 10).lineStyle(0);
   const mini = { headR: 7.9, torso: 21.6, shW: 21.6, hipW: 12.2, upper: 12.2, fore: 11.5, thigh: 15.1, shin: 14.4, t: 5 };
@@ -583,7 +585,12 @@ const AC = window.AudioContext || window.webkitAudioContext;
 const audio = AC ? new AC() : null;
 const master = audio ? audio.createGain() : null;
 if (master) { master.gain.value = 0.75; master.connect(audio.destination); }
-document.addEventListener('click', () => audio && audio.resume(), { once: true });
+function unlockAudio() {
+  if (audio && audio.state !== 'running') audio.resume();
+}
+for (const ev of ['click', 'keydown', 'pointerdown', 'touchstart']) {
+  document.addEventListener(ev, unlockAudio);
+}
 
 function beep(freq, dur = 0.1, type = 'square', gain = 0.08, when = 0) {
   if (!audio || audio.state !== 'running' || !audioOn) return;
@@ -642,6 +649,7 @@ function say(text) {
 
 const SFX = {
   fakeout: () => { beep(880, 0.09, 'square', 0.09); beep(587, 0.16, 'square', 0.09, 0.1); },
+  handoff: () => { beep(523, 0.1, 'triangle', 0.08); beep(784, 0.14, 'triangle', 0.08, 0.11); },
   tick: () => beep(660, 0.07, 'square', 0.06),
   go: () => { beep(880, 0.12); beep(1320, 0.15, 'square', 0.07, 0.1); },
   pass: () => { beep(523, 0.09); beep(659, 0.09, 'square', 0.08, 0.08); beep(784, 0.16, 'square', 0.08, 0.16); },
@@ -693,6 +701,8 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { sendKey('restart'); e.preventDefault(); }
   if (e.key === 's') sendKey('skip');
   if (e.key === 'd') sendKey('daily');
+  if (e.key === 't') sendKey('toggle2p');
+  if (e.key === 'l') sendKey('togglelegs');
   if (e.key === 'm') { audioOn = !audioOn; if (!audioOn) speechSynthesis?.cancel(); }
   if (e.key === 'c' && S && S.state === 'GAME_OVER') downloadScoreCard();
 });
@@ -822,7 +832,17 @@ app.ticker.add((dt) => {
   // HUD
   drawHearts(S.state === 'MENU' ? 0 : S.lives);
   ui.heartsG.visible = S.state !== 'MENU';
-  ui.score.text = S.state === 'MENU' ? '' : `SCORE ${S.score}`;
+  if (S.twoP && S.players && S.players.length === 2) {
+    const arrow = (i) => (S.activeP === i ? '> ' : '   ');
+    ui.score.text = S.state === 'MENU' ? '' :
+      `${arrow(0)}P1  ${S.players[0].score}   ${'\u2665'.repeat(S.players[0].lives)}`;
+    ui.score2.text = S.state === 'MENU' ? '' :
+      `${arrow(1)}P2  ${S.players[1].score}   ${'\u2665'.repeat(S.players[1].lives)}`;
+    ui.heartsG.visible = false;
+  } else {
+    ui.score.text = S.state === 'MENU' ? '' : `SCORE ${S.score}`;
+    ui.score2.text = '';
+  }
   ui.level.text = S.state === 'MENU' ? '' : `LVL ${S.level}   x${S.mult}`;
   ui.over.visible = false;
   ui.big.text = ''; ui.sub.text = '';
@@ -833,9 +853,14 @@ app.ticker.add((dt) => {
 
   if (S.state === 'MENU') {
     menuTitle.text = 'HOLE IN THE WALL';
-    menuSub.text = 'SPACE - endless    D - daily challenge    M - mute';
+    menuSub.text = 'SPACE - start    D - daily    ' +
+      `T - 2 player: ${S.twoP ? 'ON' : 'OFF'}    ` +
+      `L - leg mode: ${S.legMode ? 'ON' : 'OFF'}    M - mute`;
     menuHigh.text = `high score ${S.highScore}` +
       (S.dailyBest ? `    daily best ${S.dailyBest}` : '');
+  } else if (S.state === 'HANDOFF') {
+    ui.big.text = `PLAYER ${S.activeP + 1} - GET READY!`;
+    ui.sub.text = 'swap places!';
   }
 
   if (S.state === 'WALL') {
@@ -845,7 +870,9 @@ app.ticker.add((dt) => {
     drawMeter(S.match, S.passThreshold ?? PASS_THRESHOLD);
     drawChip(S.targetAngles);
     if (!S.tracked) ui.sub.text = 'Step back so the camera sees both your arms';
-    else if (S.match == null) ui.sub.text = 'Move back a bit - both arms need to be in view';
+    else if (S.match == null) ui.sub.text = S.legMode
+      ? 'Step back - leg mode needs your full body in view'
+      : 'Move back a bit - both arms need to be in view';
     if ((S.match ?? 0) >= (S.passThreshold ?? PASS_THRESHOLD) && S.holdT > 0.15) {
       lockText.text = `LOCKED  +${Math.floor(Math.min(S.holdT, 2) * 30)}`;
     }
@@ -867,12 +894,21 @@ app.ticker.add((dt) => {
   } else if (S.state === 'GAME_OVER') {
     ui.over.visible = true;
     overBg.clear().beginFill(0x000000, 0.72).drawRect(0, 0, W, H).endFill();
-    overTitle.text = 'GAME OVER';
-    overScore.text = `SCORE  ${S.score}`;
-    overHigh.text = S.newRecord ? `NEW HIGH SCORE!  ${S.highScore}` : `HIGH SCORE  ${S.highScore}`;
-    overHigh.style.fill = S.newRecord ? 0x66ff99 : 0xcccccc;
-    overMode.text = S.mode === 'daily'
-      ? `DAILY ${S.dailyDate}   best today ${S.dailyBest}` : 'ENDLESS';
+    if (S.twoP && S.players && S.players.length === 2) {
+      overTitle.text = S.winner === -1 ? 'TIE GAME!' : `PLAYER ${S.winner + 1} WINS!`;
+      overTitle.style.fill = 0xffd98c;
+      overScore.text = `P1  ${S.players[0].score}    -    P2  ${S.players[1].score}`;
+      overHigh.text = '';
+      overMode.text = '2 PLAYER';
+    } else {
+      overTitle.text = 'GAME OVER';
+      overTitle.style.fill = 0xff5555;
+      overScore.text = `SCORE  ${S.score}`;
+      overHigh.text = S.newRecord ? `NEW HIGH SCORE!  ${S.highScore}` : `HIGH SCORE  ${S.highScore}`;
+      overHigh.style.fill = S.newRecord ? 0x66ff99 : 0xcccccc;
+      overMode.text = S.mode === 'daily'
+        ? `DAILY ${S.dailyDate}   best today ${S.dailyBest}` : 'ENDLESS';
+    }
     overHint.text = 'SPACE play again  |  D daily  |  C save score card';
   }
 

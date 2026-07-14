@@ -34,7 +34,7 @@ from src.utils.filters import OneEuroFilter
 from examples.hole_in_wall_game import (
     HoleInWallGame, match_pose, seg_angle, ang_diff, POSES, EASY_POOL,
     MATCH_TOLERANCE, FALLOFF, PASS_THRESHOLD, GRACE_WINDOW,
-    ROUND_TIME_MIN, ROUND_TIME_STEP, PERFECT_MATCH,
+    ROUND_TIME, ROUND_TIME_MIN, ROUND_TIME_STEP, PERFECT_MATCH, START_LIVES,
     COUNTDOWN_SECS, RESULT_SECS, HIGHSCORE_PATH,
     FILTER_MIN_CUTOFF, FILTER_BETA, FRAME_W, FRAME_H)
 
@@ -55,7 +55,18 @@ WEB_POSES = POSES + [
      'legs': {'lt': -128, 'ls': -85, 'rt': -52, 'rs': -95}, 'needs_legs': True},
     {'name': 'SQUAT GOALPOST', 'angles': {'lu': 180, 'lf': 90, 'ru': 0, 'rf': 90},
      'legs': {'lt': -128, 'ls': -85, 'rt': -52, 'rs': -95}, 'needs_legs': True},
+    {'name': 'STAR JUMP', 'angles': {'lu': 135, 'lf': 135, 'ru': 45, 'rf': 45},
+     'legs': {'lt': -122, 'ls': -122, 'rt': -58, 'rs': -58}, 'needs_legs': True},
+    {'name': 'LUNGE LEFT', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'legs': {'lt': -145, 'ls': -100, 'rt': -70, 'rs': -80}, 'needs_legs': True},
+    {'name': 'LUNGE RIGHT', 'angles': {'lu': 180, 'lf': 180, 'ru': 0, 'rf': 0},
+     'legs': {'lt': -110, 'ls': -100, 'rt': -35, 'rs': -80}, 'needs_legs': True},
+    {'name': 'KICK LEFT', 'angles': {'lu': 160, 'lf': 160, 'ru': -20, 'rf': -20},
+     'legs': {'lt': -150, 'ls': -150, 'rt': -80, 'rs': -85}, 'needs_legs': True},
+    {'name': 'KICK RIGHT', 'angles': {'lu': 200, 'lf': 200, 'ru': 20, 'rf': 20},
+     'legs': {'lt': -100, 'ls': -95, 'rt': -30, 'rs': -30}, 'needs_legs': True},
 ]
+LEG_POOL = [p for p in WEB_POSES if p.get('needs_legs')]
 
 
 def torso_angle(body):
@@ -109,11 +120,18 @@ def legs_visible(body):
 class WebGame(HoleInWallGame):
     """Adds a menu, endless/daily modes, extended poses, and a hold bonus."""
 
+    HANDOFF_SECS = 3.0
+
     def __init__(self, now):
         self.mode = 'endless'
         self.daily_date = None
         self.daily_scores = {}
         self.legs_ok_until = 0.0
+        self.two_p = False
+        self.leg_mode = False
+        self.players = []
+        self.active_p = 0
+        self.winner = None
         super().__init__(now)
         self.state = 'MENU'
         self._load_daily()
@@ -135,9 +153,31 @@ class WebGame(HoleInWallGame):
         except OSError:
             pass
 
+    def _blank_player(self):
+        return {'score': 0, 'lives': START_LIVES, 'streak': 0,
+                'round_time': ROUND_TIME, 'walls_passed': 0}
+
+    def _stash_player(self):
+        self.players[self.active_p] = {
+            'score': self.score, 'lives': self.lives, 'streak': self.streak,
+            'round_time': self.round_time, 'walls_passed': self.walls_passed}
+
+    def _load_player(self, i):
+        self.active_p = i
+        p = self.players[i]
+        self.score = p['score']
+        self.lives = p['lives']
+        self.streak = p['streak']
+        self.round_time = p['round_time']
+        self.walls_passed = p['walls_passed']
+
     def start(self, now, mode):
         self.mode = mode
         self.reset(now)
+        self.players = [self._blank_player()
+                        for _ in range(2 if self.two_p else 1)]
+        self.active_p = 0
+        self.winner = None
         self._hold = 0.0
         self._last_t = now
         if mode == 'daily':
@@ -165,6 +205,8 @@ class WebGame(HoleInWallGame):
 
     def _pool(self, now=None):
         now = time.time() if now is None else now
+        if self.leg_mode:
+            return LEG_POOL
         pool = WEB_POSES[:EASY_POOL] if self.level == 1 else WEB_POSES
         if now > self.legs_ok_until:
             pool = [p for p in pool if not p.get('needs_legs')]
@@ -294,11 +336,15 @@ class WebGame(HoleInWallGame):
                 self.result = ('pass', match)
                 self.last_gain = {'points': points, 'perfect': perfect,
                                   'bonus': bonus}
+                if self.two_p:
+                    self._stash_player()
                 outcome = 'perfect' if perfect else 'pass'
             else:
                 self.lives -= 1
                 self.streak = 0
                 self.result = ('crash', match or 0.0)
+                if self.two_p:
+                    self._stash_player()
                 outcome = 'crash'
             self.state = 'RESULT'
             self.state_t0 = now
@@ -306,23 +352,52 @@ class WebGame(HoleInWallGame):
 
         if self.state == 'RESULT':
             if now - self.state_t0 >= RESULT_SECS:
+                if self.two_p:
+                    return self._advance_two_p(now)
                 if self.lives <= 0:
-                    self.state = 'GAME_OVER'
-                    self.state_t0 = now
-                    self.new_record = self.score > self.high_score
-                    if self.new_record:
-                        self.high_score = self.score
-                    if self.mode == 'daily':
-                        prev = self.daily_scores.get(self.daily_date, 0)
-                        self.daily_scores[self.daily_date] = max(prev, self.score)
-                    self._save_high_score()
+                    self._finish_game(now)
                 else:
                     self.new_wall(now)
+            return None
+
+        if self.state == 'HANDOFF':
+            if now - self.state_t0 >= self.HANDOFF_SECS:
+                self.new_wall(now)
             return None
 
         if self.state == 'COUNTDOWN':
             return super().update(match, now)
         return None
+
+    def _advance_two_p(self, now):
+        self._stash_player()
+        other = 1 - self.active_p
+        if self.players[other]['lives'] > 0:
+            self._load_player(other)
+            self.state = 'HANDOFF'
+            self.state_t0 = now
+            return 'handoff'
+        if self.lives > 0:
+            self.new_wall(now)
+            return None
+        # both players out
+        s0, s1 = self.players[0]['score'], self.players[1]['score']
+        self.winner = -1 if s0 == s1 else (0 if s0 > s1 else 1)
+        self.state = 'GAME_OVER'
+        self.state_t0 = now
+        self.new_record = False
+        return None
+
+    def _finish_game(self, now):
+        self.state = 'GAME_OVER'
+        self.state_t0 = now
+        self.new_record = self.score > self.high_score
+        if self.new_record:
+            self.high_score = self.score
+        if self.mode == 'daily':
+            prev = self.daily_scores.get(self.daily_date, 0)
+            self.daily_scores[self.daily_date] = max(prev, self.score)
+        self._save_high_score()
 
 LOCK = threading.Lock()
 LATEST = None          # most recent payload dict (with accumulated events)
@@ -436,6 +511,10 @@ def _capture_session(pose_det, game):
                 game.start(now, 'daily')
             if 'menu' in flags and game.state == 'GAME_OVER':
                 game.state = 'MENU'
+            if 'toggle2p' in flags and game.state == 'MENU':
+                game.two_p = not game.two_p
+            if 'togglelegs' in flags and game.state == 'MENU':
+                game.leg_mode = not game.leg_mode
             if 'skip' in flags and game.state == 'WALL':
                 game.new_wall(now)
 
@@ -451,8 +530,8 @@ def _capture_session(pose_det, game):
 
             # small camera preview at ~half the frame rate
             if frame_i % 2 == 0:
-                small = cv2.resize(pose_det.draw(cam, results), (208, 117))
-                ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                small = cv2.resize(pose_det.draw(cam, results), (480, 270))
+                ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 72])
                 if ok:
                     pip_b64 = base64.b64encode(buf).decode('ascii')
 
@@ -483,6 +562,13 @@ def _capture_session(pose_det, game):
                              if game.daily_date else 0,
                 'lastGain': game.last_gain,
                 'holdT': round(getattr(game, '_hold', 0.0), 2),
+                'twoP': game.two_p,
+                'legMode': game.leg_mode,
+                'activeP': game.active_p,
+                'players': ([{'score': p['score'], 'lives': p['lives']}
+                             for p in game.players]
+                            if game.two_p and len(game.players) == 2 else None),
+                'winner': game.winner,
                 'ax': round(game.avatar_x(), 1),
                 'holeDx': round(game.hole_dx(now), 1) if game.pose else 0.0,
                 'passThreshold': game.pass_threshold,
@@ -513,7 +599,7 @@ async def ws_handler(request):
                     key = json.loads(msg.data).get('key')
                 except ValueError:
                     continue
-                if key in ('restart', 'skip', 'daily', 'menu'):
+                if key in ('restart', 'skip', 'daily', 'menu', 'toggle2p', 'togglelegs'):
                     with LOCK:
                         FLAGS.add(key)
     finally:
